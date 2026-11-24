@@ -236,7 +236,7 @@ def db_default() -> dict:
     return {"users": {}, "referrals": {}, "banned": [],
             "stats": {"total_started": 0}, "chat_ids": {}, "chats": {},
             "requests": {}, "done": {}, "posts": {}, "links": {},
-            "audit": [], "ai_usage": {}}
+            "audit": [], "ai_usage": {}, "growth": {}, "audience": {}}
 
 
 def _db_load_json():
@@ -521,7 +521,7 @@ def _shrink(data) -> list:
             links.pop(key, None)
         data["links"] = links
         notes.append(f"links -> {len(links)}")
-    for field, inner in (("done", True), ("requests", True)):
+    for field in ("done", "requests"):
         store = data.get(field) or {}
         if len(store) > 2000:
             for key in list(store.keys())[: len(store) - 2000]:
@@ -921,9 +921,10 @@ def db_get_chats():
 _seen_cache: dict = {}
 
 
-def db_add_user(user, bump_start=False):
+def db_add_user(user, bump_start=False, src=None):
     """Naya user ho to True return karega.
     bump_start=True (/start) -> 'Total started' bhi badhao, USI ek write me.
+    src=/start ke deep link ka source tag (src_youtube, ref_123, inline...).
     Normal messages par 5 min tak write skip hoti hai (speed)."""
     if not bump_start and time.time() - _seen_cache.get(user.id, 0) < 300:
         return False
@@ -942,6 +943,9 @@ def db_add_user(user, bump_start=False):
         })
         if is_new:
             entry["joined_at"] = _now()
+            # Attribution: pehla source hi sach hai (baad ke links use na badlein).
+            if src:
+                entry["src"] = str(src)[:40]
         data["users"][uid] = entry
         if bump_start and is_new:
             # Sirf pehli baar — repeat /start se counter nahi badhna chahiye
@@ -1037,6 +1041,84 @@ def db_stats():
             "banned": len(data["banned"]),
             "referrals": sum(v.get("count", 0) for v in data["referrals"].values()),
         }
+
+
+def db_audience_add(chat_id, uid, name="", src="", status="member") -> None:
+    """Bot jis chat me hai wahan ka apna member-ledger.
+
+    Telegram poora member list nahi deta — par jo bhi update bot ko milta
+    hai (join request, join/leave, message bhejne wala) usse apna ledger
+    banta jata hai. Yahi "saare users" ka legal tareeka hai.
+    """
+    with _db_lock:
+        d = db_load()
+        per = d.setdefault("audience", {}).setdefault(str(chat_id), {})
+        e = per.get(str(uid)) or {}
+        e["name"] = (name or e.get("name") or "")[:64]
+        e["seen"] = _now()
+        if src and not e.get("src"):
+            e["src"] = str(src)[:40]
+        e["status"] = status
+        per[str(uid)] = e
+        # bound: ek chat ke 20k users, warna doc 16 MB ke kareeb jayega
+        if len(per) > 20000:
+            for k in list(per.keys())[: len(per) - 20000]:
+                per.pop(k, None)
+        db_save(d)
+
+
+def db_audience(chat_id) -> dict:
+    with _db_lock:
+        return dict(db_load().get("audience", {}).get(str(chat_id), {}))
+
+
+def db_audience_summary() -> dict:
+    """{chat_id: {"known": n, "in_chat": n, "left": n, "sources": {...}}}"""
+    with _db_lock:
+        data = db_load().get("audience", {})
+        out = {}
+        for cid, per in data.items():
+            sources, in_chat, left = {}, 0, 0
+            for e in per.values():
+                if e.get("status") in ("left", "banned"):
+                    left += 1
+                else:
+                    in_chat += 1
+                src = str(e.get("src") or "unknown")
+                sources[src] = sources.get(src, 0) + 1
+            out[cid] = {"known": len(per), "in_chat": in_chat, "left": left,
+                        "sources": sources}
+        return out
+
+
+def db_src_stats() -> dict:
+    """Kaunse source se kitne user aaye ({src: count})."""
+    with _db_lock:
+        users = db_load().get("users", {})
+        out = {}
+        for u in users.values():
+            src = str(u.get("src") or "direct")
+            out[src] = out.get(src, 0) + 1
+        return out
+
+
+def db_save_member_count(chat_id, count, keep_days=30) -> None:
+    """Roz ka member-count snapshot (growth dikhane ke liye)."""
+    with _db_lock:
+        d = db_load()
+        g = d.setdefault("growth", {})
+        per = g.setdefault(str(chat_id), {})
+        per[datetime.now(timezone.utc).strftime("%Y-%m-%d")] = int(count)
+        # purane din gira do (doc bound rehta hai)
+        if len(per) > max(2, keep_days):
+            for k in sorted(per)[: len(per) - max(2, keep_days)]:
+                per.pop(k, None)
+        db_save(d)
+
+
+def db_growth(chat_id) -> dict:
+    with _db_lock:
+        return dict(db_load().get("growth", {}).get(str(chat_id), {}))
 
 
 # =====================================================================
@@ -1370,11 +1452,11 @@ def delete_user_data(uid) -> dict:
             out["referrals"] = int(mine.get("count", 0) or 0)
         # Jinko isne refer kiya, unke "ref_by" bhi hatao (warna adhoora link
         # reh jata hai aur analytics jhoot bolti hai).
-        for other_id, entry in users.items():
+        for entry in users.values():
             if str(entry.get("ref_by") or "") == key:
                 entry.pop("ref_by", None)
         # Iska id kisi aur ke referral list me ho to hatao + count ghatao.
-        for rk, rv in list(refs.items()):
+        for rv in refs.values():
             lst = rv.get("users") or []
             if uid in lst:
                 lst.remove(uid)

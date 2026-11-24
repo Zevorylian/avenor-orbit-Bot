@@ -25,6 +25,7 @@
 """
 
 import asyncio
+import base64
 import difflib
 import json
 import hmac
@@ -43,6 +44,8 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
     ChatMember,
 )
 # Telegram ke asli error types — inhe pakadna ZAROORI hai:
@@ -70,6 +73,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     ChatJoinRequestHandler,
     ChatMemberHandler,
+    InlineQueryHandler,
+    MessageReactionHandler,
     ContextTypes,
     filters,
 )
@@ -154,6 +159,14 @@ from config import (
     INVITE_COOLDOWN_DAYS,
     INVITE_DECLINE_DAYS,
     INVITE_HEAVY_HOURS,
+    JOIN_DM,
+    JOIN_DM_COOLDOWN_H,
+    EPHEMERAL_WELCOME,
+    REACTION_TRACK,
+    INLINE_MODE,
+    INLINE_CACHE,
+    GROWTH_SNAPSHOT,
+    GROWTH_KEEP_DAYS,
     HUMAN_PACING,
     HUMAN_MAX_DELAY,
     HUMAN_SPLIT_CHARS,
@@ -188,7 +201,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-24 · mahiru-persona-4"
+BOT_BUILD = "2026-11-24 · mahiru-persona-8"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -216,6 +229,11 @@ from storage import (
     db_upsert_chat,
     db_get_chats,
     db_add_user,
+    db_src_stats,
+    db_save_member_count,
+    db_growth,
+    db_audience_add,
+    db_audience_summary,
     db_user_exists,
     db_all_users,
     db_is_banned,
@@ -1289,6 +1307,14 @@ async def verify_blocks_on_startup(app: Application):
     Jo problem mile wo admin ko DM bhi bhejo — sirf log me chhodo mat."""
     log.info("Storage: %s", mongo_status())
     log.info("Build %s | name: %s | username: %s", BOT_BUILD, BOT_BRAND, BOT_USERNAME)
+    try:
+        _me0 = await app.bot.get_me()
+        _sup = getattr(_me0, "supports_guest_queries", None)
+        log.info("Guest mode: %s | BotFather supports_guest_queries: %s",
+                 "ON" if GUEST_MODE else "OFF",
+                 "unknown (PTB is field ko nahi deta)" if _sup is None else _sup)
+    except Exception:
+        pass
     if BOT_BRAND_ENV_IGNORED or BOT_USERNAME_ENV_IGNORED:
         log.warning("Env me PURANA naam pada hai (BOT_BRAND / BOT_USERNAME) — "
                     "ignore kiya ja raha hai, code se '%s' chal raha hai. "
@@ -1362,9 +1388,28 @@ async def verify_blocks_on_startup(app: Application):
 # =====================================================================
 #  COMMANDS
 # =====================================================================
+def _start_source(args) -> str:
+    """Deep link se source tag nikalo.
+
+    t.me/bot?start=src_youtube  -> "youtube"
+    t.me/bot?start=ref_123      -> "ref"
+    t.me/bot?start=pCODE        -> post link, koi source nahi
+    Yehi growth ka sabse kaam ka hissa hai: har jagah ka apna code, aur
+    bot ko pata rehta hai kaun kahan se aaya.
+    """
+    if not args:
+        return ""
+    a = str(args[0])
+    if a.startswith("src_"):
+        return a[4:].strip().lower()[:40] or "src"
+    if a.startswith("ref_"):
+        return "ref"
+    return ""
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    db_add_user(user, bump_start=True)
+    db_add_user(user, bump_start=True, src=_start_source(context.args))
 
     if db_is_banned(user.id):
         await update.effective_message.reply_text("You have been blocked from using this bot.")
@@ -1375,6 +1420,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Hi {user.first_name} — please message me in private: @{context.bot.username}"
         )
         return
+
+    # Inline mode se aaya sawaal: /start ask_<base64>
+    if context.args:
+        _ask_q = _unpack_ask(context.args[0])
+        if _ask_q:
+            if not _ai_allowed(user.id):
+                await update.effective_message.reply_text(
+                    f"{fonts.small_caps('Slow down')} — {fonts.small_caps('try again in a little while')}.")
+                return
+            if _ai_budget_blocked():
+                _ai_stats["budget"] += 1
+                await update.effective_message.reply_text(budget_message())
+                return
+            await _answer_private(context, update.effective_chat.id, user, _ask_q,
+                                  _gap_hours(user.id))
+            return
 
     # /post ka deep link: /start p<code>
     #   Flow: link click -> bot chat (auto start) -> PEHLE channel gate
@@ -1467,6 +1528,7 @@ _COMMANDS = [
     ("diag",      "setup check: gate, IDs, perms",     "owner"),
     ("mongo",     "test the MongoDB connection",       "owner"),
     ("chats",     "every chat the bot is in",          "owner"),
+    ("audience",  "who is in your audience, and from where", "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
     ("getid",     "get a chat's numeric ID",           "owner"),
     ("setid",     "bind a block to a chat ID",         "owner"),
@@ -1995,6 +2057,80 @@ async def cmd_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_long(update.effective_message, "\n".join(lines).strip())
 
 
+async def cmd_audience(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner: audience ka SACH, aur Telegram ki asli hadd.
+
+    "bot ko group me daalo, saare members ki list nikaalo, sabko DM karo" —
+    Bot API me ye possible NAHI hai:
+      • bot khud kisi chat me join nahi kar sakta (aisa method hi nahi)
+      • kisi bhi method se poora member LIST nahi milta (sirf count, aur
+        ek-ek user ka status jab uski id pehle se pata ho)
+      • jisne bot ko /start nahi kiya, usko DM nahi ja sakta (403 Forbidden)
+    Jo possible hai wo yahan hai: apna audience khud banana — jo log bot se
+    mile, source ke hisaab se — aur live counts + growth.
+    """
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    me = await _get_me(context)
+    s = db_stats()
+    src = db_src_stats()
+    learned = _learned_ids()
+    out = [bd("AUDIENCE"), "", _SEP,
+           f"{sc('users bot knows')} : {bd(str(s['total_users']))}",
+           f"{sc('not banned')}      : {bd(str(max(0, s['total_users'] - s['banned'])))}",
+           _SEP]
+    for blk in LINK_BLOCKS:
+        cid = blk.get("id") or learned.get(blk["name"])
+        if not cid:
+            continue
+        try:
+            n = await context.bot.get_chat_member_count(cid)
+        except Exception as e:
+            out.append(f"{blk['name']} — {sc('?')} ({_err_hint(e)})")
+            continue
+        g = db_growth(cid)
+        days = sorted(g)[-7:]
+        line = f"{blk['name']} — {bd(str(n))} {sc('members')}"
+        if len(days) >= 2:
+            delta = int(g[days[-1]]) - int(g[days[0]])
+            line += f"  ({'+' if delta >= 0 else ''}{delta} {sc('in')} {len(days)}d)"
+        out.append(line)
+    # APNA LEDGER — Telegram list nahi deta, isliye jo updates aate hain unse
+    # banta hai: join request, join/leave, aur message bhejne wale.
+    summ = db_audience_summary()
+    if summ:
+        out += ["", bd("PEOPLE THE BOT KNOWS IN EACH CHAT"), ""]
+        for cid, info in list(summ.items())[:6]:
+            title = next((b["name"] for b in LINK_BLOCKS
+                          if _cid_key(b.get("id")) == _cid_key(cid)), "")
+            if not title:
+                title = str((db_get_chats().get(str(cid)) or {}).get("title") or cid)
+            out.append(f"{title} — {bd(str(info['known']))} {sc('known')} "
+                       f"({info['in_chat']} {sc('in')}, {info['left']} {sc('left')})")
+            top = sorted(info["sources"].items(), key=lambda kv: -kv[1])[:3]
+            if top:
+                out.append("   " + ", ".join(f"{k}:{v}" for k, v in top))
+
+    out += ["", bd("WHERE THEY CAME FROM"), ""]
+    if not src:
+        out.append(f"  {sc('nothing recorded yet')}")
+    for k, v in sorted(src.items(), key=lambda kv: -kv[1])[:8]:
+        out.append(f"  {k} : {bd(str(v))}")
+    out += ["", bd("TELEGRAM'S RULE"), "",
+            f"  {sc('a bot cannot join a chat by itself and cannot list members.')}",
+            f"  {sc('it also cannot DM someone who never started it — except one case:')}",
+            f"  {sc('a join REQUEST to a chat where the bot is admin. that one is allowed,')}",
+            f"  {sc('and this bot already uses it.')}", "",
+            f"  {sc('so the audience is built like this')}:",
+            f"  • {sc('join-request DM')} — {sc('the only legal door to a stranger')}",
+            f"  • {sc('inline mode')} — @{me.username} {sc('in any chat, no adding')}",
+            f"  • {sc('one deep link per source')} — t.me/{me.username}?start=src_instagram",
+            f"  • {sc('referral links')} — /ref",
+            f"  • {sc('bot in a group')} — {sc('one group of 2000 reaches 2000 people')}"]
+    await _send_long(update.effective_message, "\n".join(out))
+
+
 async def cmd_mongo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner: MongoDB ka LIVE test — username/host dikhao aur abhi connect karke
     dekho. Password kabhi print nahi hota."""
@@ -2089,6 +2225,8 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('ready')}  : {bd('200') if _st['durable'] else bd('503 (not durable)')}",
            f"{sc('doc size')} : {bd(f'{_doc_kb:.0f} KB')} {sc('of 16384 KB')}",
            f"{sc('gate')}   : {bd('READY') if gate_ok else bd('NOT READY')}",
+           f"{sc('guest')}  : {bd('ON') if GUEST_MODE else bd('OFF')} "
+           f"{sc('(BotFather me bhi ON hona chahiye)')}",
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
            f"{sc('ai calls')} : {bd(str(_ai_stats['calls']))} "
@@ -2465,6 +2603,94 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================================================
+#  INLINE MODE  —  bot kisi bhi chat me, bina us group me add hue
+# =====================================================================
+#  Telegram me bot KHUD kisi group/channel me join nahi kar sakta (aisa
+#  method hi nahi hai). Uske sabse kareeb do cheezein hain:
+#    1) Guest mode  (bot ko mention karo, wo wahin jawab deta hai)
+#    2) Inline mode (yahi) — user @MahiruOrbitBot likhta hai aur result
+#       wahin bhej deta hai. Har result par bot ka naam hota hai, matlab
+#       har use ek chhota advertisement hai.
+#  BotFather > Bot Settings > Inline Mode ON hona chahiye.
+def _pack_ask(q: str) -> str:
+    """Inline result se sawaal DM tak le jao.
+
+    Telegram ka deep link sirf `start` payload leta hai (max ~64 char),
+    isliye sawaal ko base64 karke bhejte hain: start=ask_<b64>.
+    """
+    raw = str(q or "").strip()[:60]
+    if not raw:
+        return ""
+    b = base64.urlsafe_b64encode(raw.encode("utf-8")).decode().rstrip("=")
+    return ("ask_" + b)[:64]
+
+
+def _unpack_ask(arg: str) -> str:
+    if not str(arg or "").startswith("ask_"):
+        return ""
+    b = str(arg)[4:]
+    try:
+        return base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)).decode(
+            "utf-8", "ignore").strip()
+    except Exception:
+        return ""
+
+
+def _inline_results(context, query: str) -> list:
+    bot_name = getattr(context.bot, "username", None) or "MahiruOrbitBot"
+    q = (query or "").strip()
+    out = []
+
+    def _art(rid, title, desc, text, url, label):
+        return InlineQueryResultArticle(
+            id=rid,
+            title=title,
+            description=desc,
+            input_message_content=InputTextMessageContent(text),
+            reply_markup=InlineKeyboardMarkup([[_btn(label, url=url)]]),
+        )
+
+    out.append(_art(
+        "mahiru", "Mahiru — talk to her",
+        "opens a private chat with Mahiru",
+        "found her ☁",
+        f"https://t.me/{bot_name}?start=src_inline", "say hi"))
+    out.append(_art(
+        "channel", "Avenor Apps AI — channel",
+        "apps, AI tools and updates",
+        "apps aur AI tools yahan pehle aate hain.",
+        CHANNEL_LINK, "open channel"))
+    out.append(_art(
+        "group", "Avenor AI Community — group",
+        "people talk here",
+        "yahan log baat karte hain.",
+        COMMUNITY_LINK, "open group"))
+    if q:
+        # Query ko base64 karke bot tak le jao — DM khulega aur jawab turant
+        # aayega. Isse inline mode "ad" nahi, kaam ki cheez ban jata hai.
+        out.append(_art(
+            "ask", f"ask Mahiru: {q[:40]}",
+            "sends this question to her in private",
+            f"ask her: {q[:120]}",
+            f"https://t.me/{bot_name}?start={_pack_ask(q)}", "ask her"))
+    return out
+
+
+async def on_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inline mode — kisi bhi chat me bot ke results."""
+    if not INLINE_MODE:
+        return
+    q = update.inline_query
+    if q is None:
+        return
+    try:
+        await q.answer(_inline_results(context, q.query),
+                       cache_time=INLINE_CACHE, is_personal=False)
+    except Exception as e:
+        log.warning("Inline answer fail: %s", e)
+
+
+# =====================================================================
 #  WELCOME  (naye member par)
 # =====================================================================
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -2496,6 +2722,9 @@ async def on_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for member in msg.new_chat_members:
         if member.is_bot:
             continue
+        _note_audience(msg.chat_id, member, src="join", status="member")
+        # Group ke andar hi private welcome — sirf usi member ko dikhta hai.
+        await _ephemeral_welcome(context, msg.chat_id, member)
         if WELCOME_TEMPLATE:
             try:
                 caption = WELCOME_TEMPLATE.format(
@@ -2532,10 +2761,119 @@ async def on_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================================
 #  JOIN REQUESTS  (owner approval, auto nahi)
 # =====================================================================
+_join_dm_at: dict = {}      # user_id -> last join-DM ka time
+_aud_seen: dict = {}        # (chat_id, user_id) -> last ledger write
+
+
+def _note_audience(chat_id, user, src=None, status="member") -> None:
+    """Apna member-ledger bharo (Telegram list nahi deta, isliye khud banate)."""
+    try:
+        db_audience_add(chat_id, user.id,
+                        name=getattr(user, "full_name", "") or "",
+                        src=src, status=status)
+    except Exception as e:
+        log.info("Audience note skip: %s", e)
+
+
+async def _send_ephemeral(bot, chat_id, user_id, text, kb=None):
+    """Group me EK hi user ko message — baaki members ko dikhta hi nahi.
+
+    Bot API 10.3+ ka "ephemeral message". PTB 22.8 me iska parameter nahi
+    hai, isliye raw `api_kwargs` se bhejte hain (wahi tareeka jo button
+    colour ke liye use hota hai). Shart: bot us group me ADMIN ho — tab wo
+    kisi bhi non-bot member ko, kabhi bhi, bhej sakta hai.
+    Delivery guaranteed nahi hai (user offline ho to nahi milega), isliye
+    ise "extra" maano, "guarantee" nahi.
+    """
+    kw = {"ephemeral_message_parameters": {"receiver_user_id": int(user_id)}}
+    args = (chat_id, text)
+    extra = {"api_kwargs": kw}
+    if kb is not None:
+        extra["reply_markup"] = kb
+    return await _safe(bot.send_message, *args, **extra)
+
+
+async def _ephemeral_welcome(context, chat_id, member) -> None:
+    """Naye member ko group ke andar hi private welcome (sirf wahi dekhta hai)."""
+    if not EPHEMERAL_WELCOME:
+        return
+    _u = getattr(context.bot, "username", None) or BOT_USERNAME
+    rows = [[_btn("say hi to Mahiru",
+                  url=f"https://t.me/{_u}?start=src_ephemeral")],
+            [_btn("Avenor Apps AI", url=CHANNEL_LINK)]]
+    name = (member.first_name or "you").strip()
+    text = (f"hey {name} — welcome.\n\n"
+            f"main mahiru hoon, isi group me rehti hoon. kuch bhi poochna ho "
+            f"to yahin likh do ya mujhe private me message kar lo.\n\n"
+            f"(ye message sirf tumhe dikh raha hai)")
+    sent = await _send_ephemeral(context.bot, chat_id, member.id, text,
+                                 InlineKeyboardMarkup(rows))
+    if sent is not None:
+        log.info("Ephemeral welcome bheja: %s (%s)", member.id, chat_id)
+        _note_audience(chat_id, member, src="ephemeral", status="member")
+
+
+async def on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kisi ne channel/group post par react kiya -> KAUN kiya, ye pata chalta hai.
+
+    Telegram channel ke subscribers ki list nahi deta. Par bot admin ho to
+    usse `message_reaction` update milta hai jisme reactor ka user hota hai —
+    isliye reaction hi wo signal hai jisse channel ka asli audience banta hai.
+    """
+    if not REACTION_TRACK:
+        return
+    r = getattr(update, "message_reaction", None)
+    if r is None:
+        return
+    usr = getattr(r, "user", None)
+    if usr is None or getattr(usr, "is_bot", False):
+        return
+    if not getattr(r, "new_reaction", None):      # reaction hataya
+        return
+    _note_audience(r.chat.id, usr, src="reaction", status="member")
+
+
+async def _join_welcome_dm(context, req, chat) -> None:
+    """Join REQUEST bhejne wale ko EK message — chahe usne bot start na kiya ho.
+
+    Bot API 5.5+ ka rule: jis chat me bot admin hai aur uske paas
+    can_invite_users hai, wahan join request aane par Telegram `user_chat_id`
+    deta hai, aur bot us user ko message kar sakta hai — bina uske /start
+    kiye. Window chhoti hai (request process hone se pehle), aur message EK.
+    Agar user jawab de de, to chat hamesha ke liye khul jata hai — yahi asli
+    "DM ka darwaza" hai.
+    """
+    if not JOIN_DM:
+        return
+    usr = req.from_user
+    now = time.time()
+    if now - _join_dm_at.get(usr.id, 0) < JOIN_DM_COOLDOWN_H * 3600:
+        return
+    target = getattr(req, "user_chat_id", None) or usr.id
+    name = (usr.first_name or "you").strip()
+    rows = [[_btn("Avenor Apps AI", url=CHANNEL_LINK)],
+            [_btn("Avenor AI Community", url=COMMUNITY_LINK)],
+            [_btn("say hi to Mahiru",
+                  url=f"https://t.me/{context.bot.username}?start=src_joinreq")]]
+    text = (f"hey {name} — request mil gayi, andar aa sakte ho.\n\n"
+            f"main mahiru hoon. baaki jagah bhi hai agar dekhna ho:\n"
+            f"channel me apps aur AI tools, group me log.\n\n"
+            f"kuch bhi poochna ho to yahin likh do, main padh rahi hoon.")
+    sent = await _safe(context.bot.send_message, target, text,
+                       reply_markup=InlineKeyboardMarkup(rows))
+    if sent is not None:
+        _join_dm_at[usr.id] = now
+        _prune(_join_dm_at, 5000)
+        log.info("Join-request DM bheja: %s (%s)", usr.id, chat.id)
+
+
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Join request aayi -> record karo aur TURANT approve kar do.
-    Koi approval button nahi (Avenor Orbit me faltu approvals hata diye hain).
-    AUTO_APPROVE_JOIN=False karo to sirf record hoga, approve nahi hoga."""
+    """Join request aayi -> record, phir DM (agar on hai), phir approve.
+
+    ZAROORI order: DM PEHLE, approve BAAD me. Telegram ka `user_chat_id`
+    sirf tab tak chalta hai jab tak request process na ho — approve karne ke
+    baad window band ho jati hai.
+    """
     req = update.chat_join_request
     chat, usr = req.chat, req.from_user
     log.info("Join request: %s (id=%s) from %s (%s)",
@@ -2544,6 +2882,12 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if b_:
         db_set_chat_id(b_["name"], chat.id)
     db_add_request(usr.id, chat.id)
+    # invite link se source (kaunsa link laaya)
+    _src = ""
+    if getattr(req, "invite_link", None) is not None:
+        _src = str(getattr(req.invite_link, "name", "") or "invite")[:40]
+    _note_audience(chat.id, usr, src=_src or "join_request", status="requested")
+    await _join_welcome_dm(context, req, chat)
     if not AUTO_APPROVE_JOIN:
         return
     try:
@@ -2600,8 +2944,17 @@ async def on_guest_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               mem_key=f"g{msg.chat_id}:u{user.id}" if user else None,
                               note=_owner_note(user.id) if user else "")
     answer = _strip_urls(answer) or answer
-    # Jawab ke saath Avenor ke buttons — isi se naye log channel tak aate hain.
-    rows = [[_btn(x["name"], url=x["url"], style="primary")] for x in LINK_BLOCKS[:3]]
+    # Jawab ke saath buttons. Guest mode me bot us group ka member hi nahi
+    # hota, isliye yahi ek jagah hai jahan se wo log apne paas la sakti hai —
+    # aur har button par `src_guest` tag hai, taaki /audience me dikhe ki
+    # kitne log isi raaste se aaye.
+    _u = getattr(context.bot, "username", None) or BOT_USERNAME
+    rows = [[_btn("say hi to Mahiru",
+                  url=f"https://t.me/{_u}?start=src_guest", style="primary")]]
+    rows += [[_btn(x["name"], url=x["url"], style="primary")] for x in LINK_BLOCKS[:3]]
+    # Ledger: kis group me guest reply gaya (audience ka hissa).
+    if user:
+        _note_audience(msg.chat_id, user, src="guest")
     try:
         from telegram import InlineQueryResultArticle, InputTextMessageContent
         res = InlineQueryResultArticle(
@@ -2647,6 +3000,12 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = getattr(cm.new_chat_member, "status", "")
     _member_cache.pop((int(usr.id), str(chat.id)), None)   # purana cache saaf
     db_del_request(usr.id, chat.id)
+    # Ledger: kaun aaya/kya gaya, aur kaunse invite link se (attribution).
+    _src = ""
+    if getattr(cm, "invite_link", None) is not None:
+        _src = str(getattr(cm.invite_link, "name", "") or "invite")[:40]
+    _note_audience(chat.id, usr, src=_src or "member_update",
+                   status="left" if status in NOT_MEMBER_STATUSES else "member")
     if status in NOT_MEMBER_STATUSES:
         log.info("User %s LEFT %s — request record hataya", usr.id, chat.id)
     else:
@@ -2879,6 +3238,13 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     learn_chat(update)
     _note_message(update.effective_user.id, msg.text)
+    # Jo group me bolta hai, wo ledger me aa jata hai (throttled — har message
+    # par DB write nahi).
+    _k = (msg.chat.id, update.effective_user.id)
+    if time.time() - _aud_seen.get(_k, 0) > 6 * 3600:
+        _aud_seen[_k] = time.time()
+        _prune(_aud_seen, 5000)
+        _note_audience(msg.chat.id, update.effective_user, src="message")
     me = await _get_me(context)
     mentioned = False
     for e in (msg.entities or []):
@@ -4082,6 +4448,21 @@ async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_long(update.effective_message, "\n".join(out))
 
 
+async def _job_growth(context: ContextTypes.DEFAULT_TYPE):
+    """Roz: har chat ka member count snapshot (growth dikhane ke liye)."""
+    if not GROWTH_SNAPSHOT:
+        return
+    for blk in LINK_BLOCKS:
+        cid = blk.get("id") or _learned_ids().get(blk["name"])
+        if not cid:
+            continue
+        try:
+            n = await context.bot.get_chat_member_count(cid)
+            db_save_member_count(cid, n, GROWTH_KEEP_DAYS)
+        except Exception as e:
+            log.info("Growth snapshot skip (%s): %s", blk["name"], e)
+
+
 async def _job_purge(context: ContextTypes.DEFAULT_TYPE):
     """Retention: purane caches saaf karo (roz ek baar)."""
     try:
@@ -4099,6 +4480,7 @@ def _schedule_maintenance(app: Application):
         return
     try:
         jq.run_repeating(_job_purge, interval=86400, first=120, name="purge")
+        jq.run_repeating(_job_growth, interval=86400, first=300, name="growth")
     except Exception as e:
         log.warning("Retention job set nahi hui: %s", e)
 
@@ -4127,6 +4509,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("mongo", cmd_mongo))
     app.add_handler(CommandHandler("chats", cmd_chats))
+    app.add_handler(CommandHandler("audience", cmd_audience))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("perms", cmd_perms))
@@ -4148,6 +4531,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("audit", cmd_audit))
 
     app.add_handler(CallbackQueryHandler(on_callback))
+    # INLINE MODE — kisi bhi chat me bina add hue
+    app.add_handler(InlineQueryHandler(on_inline_query))
+    # Reaction -> kaun kaun hai (channel/group ka asli audience signal)
+    app.add_handler(MessageReactionHandler(on_reaction))
     app.add_handler(ChatJoinRequestHandler(on_join_request))
     app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     # Kisi bhi member ka join/leave — leave par request record hata do.

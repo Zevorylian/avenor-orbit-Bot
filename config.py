@@ -471,6 +471,38 @@ INVITE_COOLDOWN_DAYS = _int_env("INVITE_COOLDOWN_DAYS", 7)  # per user
 INVITE_DECLINE_DAYS = _int_env("INVITE_DECLINE_DAYS", 90)   # "nahi" ke baad chup
 INVITE_HEAVY_HOURS = _int_env("INVITE_HEAVY_HOURS", 24)     # heavy mood ke baad
 
+# ---- GROWTH: ephemeral private message (Bot API 10.3+) ----------------
+# Group me EK user ko aisa message jise SIRF wahi dekhta hai — chahe usne
+# bot ko kabhi start na kiya ho. Rule: bot us group me ADMIN ho, to wo
+# kisi bhi (non-bot) member ko kabhi bhi bhej sakta hai. Ye Telegram ka
+# "bina start ke private message" wala official raasta hai.
+EPHEMERAL_WELCOME = _bool_env("EPHEMERAL_WELCOME", True)
+# Reaction tracking: bot admin ho to usse pata chalta hai KISNE react kiya
+# (channel/group post par) — yahi channel ke subscribers jaanne ka legal
+# tareeka hai.
+REACTION_TRACK = _bool_env("REACTION_TRACK", True)
+
+# ---- GROWTH: join-request funnel -------------------------------------
+# SABSE BADA raasta (Bot API 5.5+): jab koi channel/group join REQUEST
+# bhejta hai jahan bot admin hai (can_invite_users), to Telegram bot ko
+# `user_chat_id` deta hai — aur bot us user ko message kar sakta hai
+# CHAHE usne bot ko kabhi start na kiya ho. Ek message (5 min window),
+# aur agar user jawab de de to chat hamesha ke liye khul jata hai.
+JOIN_DM = _bool_env("JOIN_DM", True)
+# Ek user ko kitne ghante me ek hi join-DM (spam na ho).
+JOIN_DM_COOLDOWN_H = _int_env("JOIN_DM_COOLDOWN_H", 24)
+
+# ---- GROWTH: inline mode + attribution --------------------------------
+# Inline mode = bot kisi bhi chat me KAAM karta hai bina us group me add hue
+# (user @MahiruOrbitBot likhta hai, result wahan bhej deta hai). Telegram me
+# "khud join karna" possible nahi hai — inline mode uski sabse kareeb cheez
+# hai. BotFather > Bot Settings > Inline Mode ON hona chahiye.
+INLINE_MODE = _bool_env("INLINE_MODE", True)
+INLINE_CACHE = _int_env("INLINE_CACHE", 30)
+# Roz member-count ka snapshot (growth dikhane ke liye).
+GROWTH_SNAPSHOT = _bool_env("GROWTH_SNAPSHOT", True)
+GROWTH_KEEP_DAYS = _int_env("GROWTH_KEEP_DAYS", 30)
+
 # ---- HUMAN PACING (insaan jaisa timing) --------------------------------
 # Research: dynamic delay + typing cue "humanness" aur satisfaction dono
 # badhate hain; lamba reply ek saans me nahi aata — 2-3 chhote bubbles me.
