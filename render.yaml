@@ -61,7 +61,7 @@ services:
 
       # ---- Behaviour ----
       - key: BOT_BRAND
-        value: "Avenor Orbit"
+        value: "Mahiru"
       - key: GUEST_MODE          # BotFather > Bot Settings > Guest Mode ON
         value: "True"
       - key: AUTO_APPROVE_JOIN   # join request turant approve, koi button nahi
