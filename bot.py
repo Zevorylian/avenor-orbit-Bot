@@ -157,6 +157,10 @@ from config import (
     HUMAN_PACING,
     HUMAN_MAX_DELAY,
     HUMAN_SPLIT_CHARS,
+    MSG_DEBOUNCE,
+    HUMAN_REACTIONS,
+    REACTION_CHANCE,
+    GAP_NOTICE_HOURS,
     AI_CONCURRENCY,
     AI_TYPING_EVERY,
     AI_NOTICE_COOLDOWN,
@@ -184,7 +188,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-24 · mahiru-persona-3"
+BOT_BUILD = "2026-11-24 · mahiru-persona-4"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -292,7 +296,7 @@ def _capabilities_text() -> str:
     (stats/diag/broadcast/ban) ka zikr nahi — design hi ye hai ki admin ko
     upar ka tier pata na chale.
     """
-    desc = {c: d for c, d, r in _COMMANDS}
+    desc = {c: d for c, d, _r in _COMMANDS}
     lines = [
         "WHAT THIS BOT CAN ACTUALLY DO",
         "This list is the truth about your own features. Answer \"what can you "
@@ -301,7 +305,7 @@ def _capabilities_text() -> str:
         "",
         "Commands any member can use:",
     ]
-    for c, d, r in _COMMANDS:
+    for c, _d, r in _COMMANDS:
         if r != "member":
             continue
         name = POST_COMMAND if c == "POSTCMD" else c
@@ -603,25 +607,22 @@ def _invite_state(uid) -> dict:
     return st
 
 
-def _note_turn(uid, text) -> dict:
-    """Har user message par turn gino, aur heavy mood note karo."""
+def _note_message(uid, text) -> dict:
+    """Ek hi jagah se: turn gino, heavy mood note karo, "nahi" pakdo.
+
+    Pehle iske do function the (_note_turn + _note_decline) jo hamesha
+    saath-saath, ek hi jagah se bulaaye jaate the — ek hi function kaafi hai.
+    """
     st = _invite_state(uid)
     st["turns"] = int(st.get("turns", 0)) + 1
     if text and _HEAVY_RX.search(str(text)):
         st["heavy"] = time.time()
-    return st
-
-
-def _note_decline(uid, text) -> bool:
-    """Invite ke baad "no" -> us user ko lambi chhutti (dobara nahi poochhna)."""
-    st = _invite_state(uid)
     last = float(st.get("last") or 0)
     if (last and time.time() - last < 6 * 3600 and text
             and _DECLINE_RX.match(str(text))):
         st["declined"] = time.time()
         log.info("Invite declined by %s — %s din chup.", uid, INVITE_DECLINE_DAYS)
-        return True
-    return False
+    return st
 
 
 def _invite_allowed(uid) -> bool:
@@ -723,7 +724,7 @@ def _last_question(history) -> str:
 
 
 async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
-                 note: str = "", invite_uid=None) -> str:
+                 note: str = "", invite_uid=None, gap_h=None, name="") -> str:
     """Prompt bhejo, reply lo.
     where      = context line (group ka naam ya 'a private chat').
     note       = extra context (jaise 'this user is the owner').
@@ -741,6 +742,12 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     lang = _lang_hint(raw)
     if lang:
         bits.append(lang)
+    _nm = str(name or "").strip().replace('"', "").replace("\n", " ")[:32]
+    if _nm:
+        bits.append(f"their name is {_nm} — use it rarely, not in every message")
+    if gap_h is not None and GAP_NOTICE_HOURS > 0 and gap_h >= GAP_NOTICE_HOURS:
+        bits.append(f"they were away for about {int(round(gap_h))} hour(s) — you "
+                    f"may notice it once, casually, only if it fits")
     _q = _last_question(history)
     if _q:
         bits.append(f'you already asked them: "{_q}" — do not ask it again '
@@ -1697,8 +1704,8 @@ def _forwarded_chat(msg):
     hamesha 'Forward a message...' hi kehta rehta tha."""
     o = getattr(msg, "forward_origin", None)
     if o is not None:
-        ch = getattr(o, "chat", None) or getattr(o, "sender_chat", None)
-        return ch                      # user/hidden forward -> None
+        # user/hidden forward -> None
+        return getattr(o, "chat", None) or getattr(o, "sender_chat", None)
     return getattr(msg, "forward_from_chat", None)   # purani API
 
 
@@ -1798,7 +1805,6 @@ async def _safe(fn, *a, _retries=1, **k):
             # ChatMigrated me old_chat_id hota hi NAHI — sirf new_chat_id.
             # Isliye purani id ka pata nahi chalta; on_migrate handler us
             # service-message se theek karta hai jo migration par aata hai.
-            pass
             return None
         except Conflict as e:
             log.error("409 Conflict — do bot instances chal rahe hain? %s", e)
@@ -1838,24 +1844,39 @@ def _err_hint(e) -> str:
 _SEP = "━━━━━━━━━━━━━━━━━"
 
 
+def _split_text(text, limit) -> list:
+    """Text ko limit ke andar tukdon me todo — line par, aur lambi line ko
+    word boundary par. _send_long aur _bubbles dono YAHI use karte hain
+    (pehle dono ke apne alag splitter the — wahi logic do baar likha hua)."""
+    out, cur = [], ""
+    for line in (text or "").split("\n"):
+        while len(line) > limit:          # ek hi line bahut lambi -> tod do
+            if cur:
+                out.append(cur)
+                cur = ""
+            cut = line.rfind(" ", 0, limit)
+            if cut < limit // 2:          # space bahut pehle -> beech se kaato
+                cut = limit
+            out.append(line[:cut].rstrip())
+            line = line[cut:].lstrip()
+        if cur and len(cur) + len(line) + 1 > limit:
+            out.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        out.append(cur)
+    return out or [""]
+
+
 async def _send_long(message, text, limit=3800):
     """Telegram ki 4096 limit — lamba text tukdon me bhejo, warna error aata hai.
     Har chunk _safe se jaata hai (429/403 par crash nahi)."""
     if len(text) <= limit:
         await _safe(message.reply_text, text)
         return
-    part = ""
-    for line in text.split("\n"):
-        while len(line) > limit:          # ek hi line bahut lambi -> tod do
-            await _safe(message.reply_text, line[:limit])
-            line = line[limit:]
-        if part and len(part) + len(line) + 1 > limit:
-            await _safe(message.reply_text, part)
-            part = line
-        else:
-            part = f"{part}\n{line}" if part else line
-    if part:
-        await _safe(message.reply_text, part)
+    for chunk in _split_text(text, limit):
+        await _safe(message.reply_text, chunk)
 
 
 # =====================================================================
@@ -1873,25 +1894,7 @@ def _bubbles(text: str) -> list:
         return []
     if not HUMAN_PACING or len(t) <= HUMAN_SPLIT_CHARS:
         return [t]
-    limit = HUMAN_SPLIT_CHARS
-    parts, cur = [], ""
-    for line in t.split("\n"):
-        while len(line) > limit:            # ek hi line bahut lambi -> todo
-            if cur:
-                parts.append(cur.rstrip())
-                cur = ""
-            cut = line.rfind(" ", 0, limit)
-            if cut < limit * 0.5:
-                cut = limit
-            parts.append(line[:cut].rstrip())
-            line = line[cut:].lstrip()
-        if cur and len(cur) + len(line) + 1 > limit:
-            parts.append(cur.rstrip())
-            cur = line
-        else:
-            cur = f"{cur}\n{line}" if cur else line
-    if cur.strip():
-        parts.append(cur.rstrip())
+    parts = [x for x in _split_text(t, HUMAN_SPLIT_CHARS) if x.strip()]
     # 3 se zyada bubble spam lagte hain — baaki aakhri message me jodo.
     if len(parts) > 3:
         parts = parts[:2] + ["\n".join(parts[2:])]
@@ -2734,6 +2737,69 @@ async def on_chat_seen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     learn_chat(update)
 
 
+# =====================================================================
+#  HUMAN BEHAVIOUR  —  jo asli insaan karta hai aur bot nahi karta
+# =====================================================================
+#  Teen cheezein yahan hain, teeno insaan ki asli aadatein:
+#   1) ek saath 2-3 message aayein to har tukde ka jawab nahi — thoda ruk kar
+#      poora padho, ek jawab do (debounce)
+#   2) kabhi kabhi message par emoji reaction (Telegram feature)
+#   3) ghanton baad wapas aaye to "kahan the" notice kar sake (gap)
+_debounce: dict = {}       # uid -> {"texts": [...], "task": Task}
+_last_msg_at: dict = {}    # uid -> last message ka time
+
+_REACTIONS = ("\u2764", "\U0001fae6", "\u2601", "\U0001f319", "\u2728", "\U0001f60c")
+
+
+def _gap_hours(uid):
+    """Pichhle message se ab tak kitne ghante? (pehla message = None)"""
+    prev = _last_msg_at.get(uid)
+    _last_msg_at[uid] = time.time()
+    _prune(_last_msg_at, 5000)
+    if not prev:
+        return None
+    return (time.time() - prev) / 3600.0
+
+
+async def _react(bot, msg) -> None:
+    """Kabhi kabhi user ke message par emoji reaction — bilkul insaan jaisa."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=msg.chat_id, message_id=msg.message_id,
+            reaction=random.choice(_REACTIONS))
+    except Exception:
+        pass          # reaction optional hai — fail ho to chup-chaap chhodo
+
+
+async def _answer_private(context, chat_id, user, text, gap_h=None) -> None:
+    """Ek hi jagah se AI ka jawab — debounced aur seedha, dono yahi use karte."""
+    _ai_count()
+    async with _typing(context, chat_id):
+        answer = await ask_ai(
+            text, where="a private chat", mem_key=f"u{user.id}",
+            note=_owner_note(user.id), invite_uid=user.id,
+            gap_h=gap_h, name=user.first_name or "")
+    await _send_human(context.bot, chat_id, answer)
+
+
+async def _debounced_answer(context, chat_id, user, slot, gap_h) -> None:
+    """Thoda ruk kar ek saath saare tukde padho, phir EK jawab do."""
+    try:
+        await asyncio.sleep(max(0.0, MSG_DEBOUNCE))
+    except asyncio.CancelledError:
+        return          # naya message aa gaya — wo naya task sambhaal lega
+    texts = [t for t in (slot.get("texts") or []) if t]
+    slot["texts"] = []
+    if not texts:
+        return
+    prompt = "\n".join(texts) if len(texts) > 1 else texts[0]
+    try:
+        await _answer_private(context, chat_id, user, prompt, gap_h)
+    except Exception as e:
+        log.warning("Debounced answer fail: %s", e)
+        await _safe(context.bot.send_message, chat_id, busy_message())
+
+
 async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Private chat mein AI bina mention chalta hai — seedha sawaal likho."""
     user = update.effective_user
@@ -2769,8 +2835,7 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     # INVITE TIMING: turn gino, heavy mood note karo, "nahi" pakdo. Sab
     # eligibility hai — sach me bolna hai ya nahi wo AI tay karti hai.
-    _note_turn(user.id, update.effective_message.text)
-    _note_decline(user.id, update.effective_message.text)
+    _note_message(user.id, update.effective_message.text)
     if not _ai_allowed(user.id):
         _ai_stats["rate"] += 1
         await update.effective_message.reply_text(
@@ -2783,13 +2848,27 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         _ai_stats["budget"] += 1
         await _safe(update.effective_message.reply_text, budget_message())
         return
-    _ai_count()
-    async with _typing(context, update.effective_chat.id):
-        answer = await ask_ai(update.effective_message.text, where="a private chat",
-                              mem_key=f"u{user.id}",
-                              note=_owner_note(user.id),
-                              invite_uid=user.id)
-    await _send_human(context.bot, update.effective_chat.id, answer)
+    gap_h = _gap_hours(user.id)
+    if HUMAN_REACTIONS and random.random() < REACTION_CHANCE:
+        await _react(context.bot, update.effective_message)
+    text = update.effective_message.text or ""
+    chat_id = update.effective_chat.id
+    # DEBOUNCE: user ek saath 3 message bhej de (venting) to 3 jawab nahi —
+    # 1.2s ruk kar poora padho, ek jawab do. Insaan yahi karta hai.
+    if MSG_DEBOUNCE > 0:
+        slot = _debounce.setdefault(user.id, {"texts": [], "task": None})
+        slot["texts"].append(text)
+        old = slot.get("task")
+        if old is not None and not old.done():
+            old.cancel()
+        task = asyncio.create_task(
+            _debounced_answer(context, chat_id, user, slot, gap_h))
+        slot["task"] = task
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+        _prune(_debounce, 5000)
+        return
+    await _answer_private(context, chat_id, user, text, gap_h)
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2799,7 +2878,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         return
     learn_chat(update)
-    _note_turn(update.effective_user.id, msg.text)
+    _note_message(update.effective_user.id, msg.text)
     me = await _get_me(context)
     mentioned = False
     for e in (msg.entities or []):
@@ -3288,7 +3367,8 @@ def _post_caption(p, ep_line="", link_url="", text_links=True) -> str:
     if not title:
         for k in _post_fields(p.get("type")):
             if k not in ("Link",) and p.get(k):
-                title = p.get(k); break
+                title = p.get(k)
+                break
     # Telegram ka blockquote khud ek quote-mark dikhata hai. Uske upar
     # "❝ ❞" lagane se double quotes ho jaate the — isliye hata diye.
     out = [f"<blockquote>{_esc(bd(str(title or '-')))}</blockquote>", ""]
@@ -3670,7 +3750,8 @@ def _fit_caption(cap: str, limit: int = CAPTION_LIMIT) -> str:
             if not keep:
                 keep.append(line[:budget])
             break
-        keep.append(line); total += add
+        keep.append(line)
+        total += add
     out = "\n".join(keep)
     # jitne tag khule hain, unhe band karo (blockquote / a / b)
     for tag in ("blockquote", "a", "b", "i"):

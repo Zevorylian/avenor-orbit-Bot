@@ -8,7 +8,7 @@ tracked deep link, and keeps its state in MongoDB so nothing is lost on redeploy
 - **Channel:** [Avenor Apps AI](https://t.me/AvenorAppsAI)
 - **Group:** [Avenor AI Community](https://t.me/AvenorAICommunity)
 - **Repository:** [github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot)
-- **Developer:** [Zevorylian](https://github.com/Zevorylian)
+- **Developer:** [Deepak](https://github.com/Zevorylian) · [X](https://x.com/Zevorylian) · [Reddit](https://www.reddit.com/u/Zevorylian)
 
 ---
 
