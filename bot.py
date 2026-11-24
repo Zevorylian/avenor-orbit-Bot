@@ -133,6 +133,8 @@ from config import (
     _clean_host,
     _host_looks_wrong,
     AI_SYSTEM_PROMPT,
+    BOT_BRAND_ENV_IGNORED,
+    BOT_USERNAME_ENV_IGNORED,
     AI_MAX_CHARS,
     AI_CAPABILITIES_IN_PROMPT,
     AUDIT_KEEP,
@@ -168,6 +170,10 @@ logging.basicConfig(
 # httpx ke GET/POST logs chhupa do (shor kam)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("bot")
+
+# Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
+# server par kaunsa code chal raha hai (purana build hone par turant dikhe).
+BOT_BUILD = "2026-11-24 · mahiru-persona-1"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -555,6 +561,26 @@ def busy_message() -> str:
     return AI_BUSY_MESSAGE.replace("{ai_link}", ai_block["url"] if ai_block else "AI")
 
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _now_context() -> str:
+    """'it is 2:14 AM on Tuesday (late night, IST)'.
+
+    Mahiru ki bio hi waqt ke baare me hai ("noon, midnight, 2am — the door
+    doesn't lock"). Isliye har message ke saath asli waqt bhejte hain, warna
+    wo raat 3 baje bhi "good morning" bol sakti hai.
+    """
+    now = datetime.now(_IST)
+    h = now.hour
+    part = ("late night" if h < 5 else "early morning" if h < 8 else
+            "morning" if h < 12 else "afternoon" if h < 17 else
+            "evening" if h < 21 else "night")
+    clock = now.strftime("%I:%M %p").lstrip("0")
+    return (f"it is {clock} on {now.strftime('%A')} ({part}, IST) for the "
+            f"person you are talking to")
+
+
 async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                  note: str = "") -> str:
     """Prompt bhejo, reply lo. lite=True se sasta/fast model use hoga.
@@ -565,10 +591,14 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     bits = []
     if where:
         bits.append(f"you are in {where}")
+    bits.append(_now_context())
     if note:
         bits.append(note)
-    if bits:
-        prompt = f"(Context: {'; '.join(bits)}.)\n\n{prompt}"
+    # Chhota re-anchor: persona lambi baat-cheet me drift karti hai, isliye har
+    # turn par ek line — app ki taraf se, user ke text me nahi (warna user
+    # khud apna 'reminder' likh sakta hai).
+    bits.append("stay mahiru: warm, short, lowercase, no markdown")
+    prompt = f"(Context: {'; '.join(bits)}.)\n\n{prompt}"
     history = _hist(mem_key) if mem_key is not None else []
     # Model kabhi "500 UNAVAILABLE / high demand" deta hai -> retry + doosra model.
     # Fail-fast: kam attempts, chhota backoff (delay kam karne ke liye).
@@ -1078,6 +1108,11 @@ async def verify_blocks_on_startup(app: Application):
     """Start par check: har enforced chat ki id hai? bot admin hai?
     Jo problem mile wo admin ko DM bhi bhejo — sirf log me chhodo mat."""
     log.info("Storage: %s", mongo_status())
+    log.info("Build %s | name: %s | username: %s", BOT_BUILD, BOT_BRAND, BOT_USERNAME)
+    if BOT_BRAND_ENV_IGNORED or BOT_USERNAME_ENV_IGNORED:
+        log.warning("Env me PURANA naam pada hai (BOT_BRAND / BOT_USERNAME) — "
+                    "ignore kiya ja raha hai, code se '%s' chal raha hai. "
+                    "Render > Environment se unhe delete ya update karo.", BOT_BRAND)
     log.info("PTB %s | button colour: %s | AI prompt: %s",
              telegram.__version__,
              "supported" if _STYLE_OK else "NOT supported",
@@ -1209,7 +1244,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Owner ke liye kuch nahi (na channels, na Verify) — seedha welcome.
     # Admin aur member dono ko wahi 5 links + Joined / Verify milte hain.
     head = (f"{fonts.bold('Welcome, ' + (user.first_name or 'friend'))}\n\n"
-            f"I am {fonts.bold(BOT_BRAND)}. Just type your question.")
+            f"I am {fonts.bold(BOT_BRAND)}. Say hi — or just tell me what is "
+            f"on your mind.")
     if is_owner(user.id):
         await update.effective_message.reply_text(head)
         return
@@ -1799,6 +1835,10 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         _doc_kb = 0
     out = [bd("BOT STATUS"), "", sep,
+           # build/naam PLAIN — bold math digits padhne/copy karne me gadbad karte hain
+           f"{sc('build')}   : {BOT_BUILD}",
+           f"{sc('name')}    : {BOT_BRAND} "
+           f"({('@' + me.username) if getattr(me, 'username', None) else BOT_USERNAME})",
            f"{sc('storage')} : {bd(mongo_status())}",
            f"{sc('state')}   : {bd(_st['state'])}",
            f"{sc('durability')} : {bd(_st.get('durability') or '?')}",
