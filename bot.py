@@ -3835,8 +3835,12 @@ def build_application() -> Application:
     # Photo ke alawa sticker / voice / file / video — in par bhi ek saaf jawab,
     # warna user ko lagta tha bot ne suna hi nahi.
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & (filters.VOICE | filters.STICKER | filters.DOCUMENT
-                                    | filters.VIDEO | filters.AUDIO | filters.VIDEO_NOTE),
+        # PTB me STICKER/DOCUMENT ke uppercase alias hote hi nahi — sirf
+        # filters.Sticker.ALL / filters.Document.ALL. (Yahi wajah thi ki deploy
+        # build_application() par AttributeError se gir gaya tha.)
+        filters.ChatType.PRIVATE & (filters.VOICE | filters.Sticker.ALL
+                                    | filters.Document.ALL | filters.VIDEO
+                                    | filters.AUDIO | filters.VIDEO_NOTE),
         on_private_media))
 
     # Group 1: jo bhi group update group 0 me handle na ho (photo, sticker,
