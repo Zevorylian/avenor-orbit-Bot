@@ -2,12 +2,12 @@
 
 Last updated: 31 October 2026
 
-Avenor Orbit (`@AvenorOrbitBot`) is a Telegram community bot. This page explains what it stores,
+Mahiru (`@MahiruOrbitBot`) is a Telegram community bot. This page explains what it stores,
 why, who else sees it, and how to have it deleted. The same notice is available inside the bot with
 the `/privacy` command.
 
 Contact for any privacy request: the bot owner listed in the repository
-[github.com/bydenvik/avenor-orbit-Bot](https://github.com/bydenvik/avenor-orbit-Bot), or the community
+[github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot), or the community
 group [@AvenorAICommunity](https://t.me/AvenorAICommunity).
 
 ---

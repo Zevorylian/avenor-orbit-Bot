@@ -1,14 +1,14 @@
-# Avenor Orbit
+# Mahiru · Avenor Orbit
 
 A Telegram bot that manages a community and publishes to channels from one place. It greets and
 moderates members, answers questions as an AI assistant, builds and schedules channel posts with a
 tracked deep link, and keeps its state in MongoDB so nothing is lost on redeploy.
 
-- **Bot:** [@AvenorOrbitBot](https://t.me/AvenorOrbitBot)
+- **Bot:** [@MahiruOrbitBot](https://t.me/MahiruOrbitBot)  ·  Mahiru is the bot's name
 - **Channel:** [Avenor Apps AI](https://t.me/AvenorAppsAI)
 - **Group:** [Avenor AI Community](https://t.me/AvenorAICommunity)
-- **Repository:** [github.com/bydenvik/avenor-orbit-Bot](https://github.com/bydenvik/avenor-orbit-Bot)
-- **Developer:** [bydenvik](https://github.com/bydenvik) · [X](https://x.com/bydenvik) · [Reddit](https://www.reddit.com/u/bydenvik)
+- **Repository:** [github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot)
+- **Developer:** [Zevorylian](https://github.com/Zevorylian)
 
 ---
 
@@ -24,7 +24,7 @@ when it is @mentioned. It mirrors the language the person writes in, remembers t
 person per chat, and never claims to be human.
 
 **Guest mode.** Telegram lets a bot answer in a group it has *not* joined when someone mentions it.
-With Guest Mode enabled in BotFather, `@AvenorOrbitBot` works in any group without being added — the
+With Guest Mode enabled in BotFather, `@MahiruOrbitBot` works in any group without being added — the
 bot replies in place, with your channel buttons attached. This is the only supported way for a bot to
 reach a chat it is not a member of; a bot cannot add itself anywhere.
 
@@ -65,7 +65,7 @@ The code is three modules, split along the one boundary that matters:
 ## Quick start
 
 ```bash
-git clone https://github.com/bydenvik/avenor-orbit-Bot.git
+git clone https://github.com/Zevorylian/avenor-orbit-Bot.git
 cd avenor-orbit-Bot
 pip install -r requirements.lock        # exact versions
 cp env.example.txt .env                 # then fill in the values below
@@ -96,7 +96,7 @@ Seven variables are needed. Everything else has a working default in `config.py`
 | `MONGO_HOST` | `cluster0.xxxxx.mongodb.net` — the host only |
 | `MONGO_USER` | Atlas database user |
 | `MONGO_PASSWORD` | That user's password |
-| `BOT_USERNAME` | `@AvenorOrbitBot` |
+| `BOT_USERNAME` | `@MahiruOrbitBot` |
 
 **Why the host is separate from a connection string.** A full `mongodb+srv://user:pass@host/` string
 has to be hand-carried between three apps, and it breaks in four different ways: a typo in the host

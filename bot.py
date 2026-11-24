@@ -122,7 +122,7 @@ from config import (
     JOIN_PROMPT,
     AI_API_KEY,
     AI_MODEL,
-    AI_MODEL_LITE,
+    COMMUNITY_LINK,
     MONGO_URI_SAFE,
     MONGO_HOST,
     MONGO_DB,
@@ -146,6 +146,17 @@ from config import (
     AI_GROUP_DAILY_MAX,
     AI_TIMEOUT,
     AI_TOTAL_BUDGET,
+    AI_MODELS,
+    AI_MODEL_CYCLES,
+    CHANNEL_LINK,
+    INVITE_ENABLED,
+    INVITE_MIN_TURNS,
+    INVITE_COOLDOWN_DAYS,
+    INVITE_DECLINE_DAYS,
+    INVITE_HEAVY_HOURS,
+    HUMAN_PACING,
+    HUMAN_MAX_DELAY,
+    HUMAN_SPLIT_CHARS,
     AI_CONCURRENCY,
     AI_TYPING_EVERY,
     AI_NOTICE_COOLDOWN,
@@ -173,7 +184,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-24 · mahiru-persona-1"
+BOT_BUILD = "2026-11-24 · mahiru-persona-2"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -561,6 +572,82 @@ def busy_message() -> str:
     return AI_BUSY_MESSAGE.replace("{ai_link}", ai_block["url"] if ai_block else "AI")
 
 
+# =====================================================================
+#  INVITE TIMING  —  Mahiru kab apna channel / group kholti hai
+# =====================================================================
+#  Random NAHI. Do layer:
+#    1) ye code sirf ELIGIBILITY tay karta hai (kitni baat hui, cooldown,
+#       "nahi" bola ya nahi, mood heavy hai ya nahi, owner/admin hai kya)
+#    2) "is waqt bolna theek hai ya nahi" AI tay karti hai (rules prompt me)
+#  Isse wo kabhi bhi "join karo" nahi chipkati — sirf tab jab baat me fit ho.
+_invite: dict = {}      # uid -> {"turns","last","declined","heavy"}
+
+_HEAVY_RX = re.compile(
+    r"\b(sad|depress|lonely|alone|cry|crying|hurt|broken|tired|exhausted|"
+    r"anxious|panic|scared|afraid|hate myself|worthless|hopeless|suicide|"
+    r"kill myself|end it|self.?harm|abuse|died|death|funeral|"
+    r"akela|akeli|udaas|dukhi|rona|ro raha|thak gaya|thak gayi|pareshan|"
+    r"tanha|mar jaana|marna|atmahatya)\b", re.I)
+
+_DECLINE_RX = re.compile(
+    r"^\s*(no|nahi|nah|nope|not interested|no thanks|no thank you|"
+    r"mat bhejo|mat karo|band karo|stop|skip)\b", re.I)
+
+
+def _invite_state(uid) -> dict:
+    st = _invite.get(uid)
+    if st is None:
+        st = {"turns": 0, "last": 0.0, "declined": 0.0, "heavy": 0.0}
+        _invite[uid] = st
+        _prune(_invite, 5000)
+    return st
+
+
+def _note_turn(uid, text) -> dict:
+    """Har user message par turn gino, aur heavy mood note karo."""
+    st = _invite_state(uid)
+    st["turns"] = int(st.get("turns", 0)) + 1
+    if text and _HEAVY_RX.search(str(text)):
+        st["heavy"] = time.time()
+    return st
+
+
+def _note_decline(uid, text) -> bool:
+    """Invite ke baad "no" -> us user ko lambi chhutti (dobara nahi poochhna)."""
+    st = _invite_state(uid)
+    last = float(st.get("last") or 0)
+    if (last and time.time() - last < 6 * 3600 and text
+            and _DECLINE_RX.match(str(text))):
+        st["declined"] = time.time()
+        log.info("Invite declined by %s — %s din chup.", uid, INVITE_DECLINE_DAYS)
+        return True
+    return False
+
+
+def _invite_allowed(uid) -> bool:
+    """Sirf eligibility. Sach me bolna hai ya nahi — AI tay karti hai."""
+    if not INVITE_ENABLED:
+        return False
+    if is_privileged(uid):        # owner/admin ko kuch bechna nahi hai
+        return False
+    st = _invite_state(uid)
+    now = time.time()
+    if int(st.get("turns", 0)) < INVITE_MIN_TURNS:
+        return False
+    if st.get("last") and now - float(st["last"]) < INVITE_COOLDOWN_DAYS * 86400:
+        return False
+    if (st.get("declined")
+            and now - float(st["declined"]) < INVITE_DECLINE_DAYS * 86400):
+        return False
+    if st.get("heavy") and now - float(st["heavy"]) < INVITE_HEAVY_HOURS * 3600:
+        return False
+    return True
+
+
+def _mark_invited(uid) -> None:
+    _invite_state(uid)["last"] = time.time()
+
+
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -582,11 +669,13 @@ def _now_context() -> str:
 
 
 async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
-                 note: str = "") -> str:
-    """Prompt bhejo, reply lo. lite=True se sasta/fast model use hoga.
-    where   = context line (group ka naam ya 'a private chat').
-    note    = extra context (jaise 'this user is the owner').
-    mem_key = iske hisaab se thodi conversation memory rakhi jaati hai."""
+                 note: str = "", invite_uid=None) -> str:
+    """Prompt bhejo, reply lo.
+    where      = context line (group ka naam ya 'a private chat').
+    note       = extra context (jaise 'this user is the owner').
+    mem_key    = iske hisaab se thodi conversation memory rakhi jaati hai.
+    invite_uid = eligible user ho to AI ko "darwaza khol sakti ho" ki
+                 permission milti hai (timing ke rules prompt me hain)."""
     raw = prompt
     bits = []
     if where:
@@ -598,30 +687,43 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     # turn par ek line — app ki taraf se, user ke text me nahi (warna user
     # khud apna 'reminder' likh sakta hai).
     bits.append("stay mahiru: warm, short, lowercase, no markdown")
+    # INVITE TIMING: eligible hai ya nahi wo code tay karta hai; bolna hai ya
+    # nahi wo AI tay karti hai. Isliye yahan sirf permission jata hai.
+    if invite_uid is not None and _invite_allowed(invite_uid):
+        bits.append(
+            "you MAY open the door once, at the very end, in one short line — "
+            f"channel {CHANNEL_LINK} (apps and AI tools land there) or group "
+            f"{COMMUNITY_LINK} (people talk there) — but only if it truly fits "
+            "what they just said. If they are sad, upset, in crisis, or just "
+            "said no, do not mention it at all. It is not required: if it does "
+            "not fit, say nothing about it")
     prompt = f"(Context: {'; '.join(bits)}.)\n\n{prompt}"
     history = _hist(mem_key) if mem_key is not None else []
-    # Model kabhi "500 UNAVAILABLE / high demand" deta hai -> retry + doosra model.
-    # Fail-fast: kam attempts, chhota backoff (delay kam karne ke liye).
-    models = [AI_MODEL_LITE, AI_MODEL] if lite else [AI_MODEL, AI_MODEL_LITE]
+    # ---- MODEL CHAIN -------------------------------------------------
+    # Owner ka order: Gemma 4 26B -> Gemma 4 31B -> Gemini 2.5 Flash Lite
+    # -> Gemini 3.1 Flash Lite -> Gemini 3 Flash. Chain khatam ho to (time
+    # bacha ho to) pehle model se dobara. Bounded: AI_MODEL_CYCLES passes +
+    # AI_TOTAL_BUDGET. Bina hadd ke "dobara shuru" = infinite loop aur bill.
+    chain = [m for m in AI_MODELS if m] or [AI_MODEL]
     last_err = None
     _ai_stats["calls"] += 1
-    # POORA intezaar ek hadd me: 2 model x 2 koshish x AI_TIMEOUT = 3 minute tak
-    # ja sakta tha, aur user tab tak chala jaata tha. Ab total deadline hai.
     deadline = time.monotonic() + max(1, AI_TOTAL_BUDGET)
-    for model in models:
+    attempt = 0
+    for cycle in range(max(1, AI_MODEL_CYCLES)):
         if deadline - time.monotonic() <= 2:
             break
-        for attempt in range(2):
+        if cycle:
+            log.info("AI chain: saare model fail — pehle se dobara (pass %s/%s)",
+                     cycle + 1, AI_MODEL_CYCLES)
+            await asyncio.sleep(min(0.4 * cycle + random.random() * 0.3, 2))
+        for model in chain:
             left = deadline - time.monotonic()
             if left <= 2:
                 break
+            attempt += 1
             try:
-                # ZAROORI (user ki shikayat: "jawab kabhi aata nahi"):
-                # pehle is call par koi timeout hi nahi tha. Provider atak
-                # jaye to ye awaaz hi nahi karta tha — handler hamesha ke
-                # liye wait karta rehta aur user ko kuch nahi milta.
-                # Ab har koshish ka apna deadline hai, aur semaphore se ek
-                # saath chalne wali requests bhi bounded hain.
+                # ZAROORI ("jawab kabhi aata nahi"): har koshish ka apna
+                # deadline, aur semaphore se ek saath chalti requests bounded.
                 async with _ai_limiter():
                     text = await asyncio.wait_for(
                         asyncio.to_thread(_run_ai, model, prompt, history),
@@ -633,32 +735,36 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                     if mem_key is not None:
                         _hist_add(mem_key, "user", raw)
                         _hist_add(mem_key, "model", text)
+                    if invite_uid is not None:
+                        low = text.lower()
+                        # Link ya community ka naam aaya = invite ho gaya.
+                        if ("avenor" in low or "t.me/" in low
+                                or COMMUNITY_LINK.lower() in low
+                                or CHANNEL_LINK.lower() in low):
+                            _mark_invited(invite_uid)
                     _ai_stats["ok"] += 1
                     return text
                 last_err = last_err or "empty response"
-                log.warning("AI ne khaali jawab diya (model=%s try=%s)", model, attempt + 1)
+                log.warning("AI ne khaali jawab diya (model=%s #%s)", model, attempt)
             except asyncio.TimeoutError:
                 _ai_stats["timeout"] += 1
                 last_err = f"timeout after {AI_TIMEOUT}s"
-                log.warning("AI timeout (model=%s try=%s, %ss)", model, attempt + 1, AI_TIMEOUT)
-                # Timeout retry ke layak hai — par poora deadline dohraana
-                # bekaar, isliye seedha agla model.
-                break
+                log.warning("AI timeout (model=%s #%s, %ss) — agla model",
+                            model, attempt, AI_TIMEOUT)
+                continue
             except Exception as e:
                 last_err = e
-                log.warning("AI fail (model=%s try=%s): %s", model, attempt + 1, e)
+                log.warning("AI fail (model=%s #%s): %s", model, attempt, e)
                 low = str(e).lower()
                 if "thinking" in low:
-                    # Provider ne level reject kiya -> config theek karo aur
-                    # turant dobara (sleep nahi, ye network error nahi hai).
+                    # Provider ne level reject kiya -> config theek karo, agla.
                     _disable_thinking(model)
                     continue
-                if not _ai_retryable(e):
-                    # Galat key / galat model / permission — dobara try bekaar.
-                    # Agle model par jao (ho sakta hai wo chal jaye).
-                    break
-                # Exponential backoff + jitter (thundering herd se bachne ke liye).
-                await asyncio.sleep(min(0.8 * (2 ** attempt) + random.random() * 0.4, 4))
+                # Chain me har koshish DOOSRA model hai, isliye yahan backoff
+                # nahi — sirf agla model try karo. (Pehle har fail par 1-3s
+                # sone se, 5 model fail hone par user 8 second extra wait
+                # karta tha.) Backoff sirf naye pass ki shuruaat me.
+                continue
     _ai_stats["fail"] += 1
     log.error("AI poora fail: %s", last_err)
     # User ko kabhi provider ka naam nahi dikhna chahiye.
@@ -1685,6 +1791,74 @@ async def _send_long(message, text, limit=3800):
         await _safe(message.reply_text, part)
 
 
+# =====================================================================
+#  HUMAN PACING  —  insaan jaisa timing
+# =====================================================================
+#  Research: dynamic delay + typing cue se "humanness" aur satisfaction dono
+#  badhte hain; aur asli chat me jawab ek bhaari paragraph me nahi, 2-3 chhote
+#  messages me aata hai. Isliye lamba jawab bubbles me jaata hai, har bubble
+#  se pehle thodi "typing" ke saath. Sab capped: poora extra intezaar
+#  HUMAN_MAX_DELAY se zyada nahi (user ko intezaar ka ehsaas na ho).
+def _bubbles(text: str) -> list:
+    """Ek lamba jawab 2-3 chhote messages me todo. Chhota reply ek hi rehta hai."""
+    t = (text or "").strip()
+    if not t:
+        return []
+    if not HUMAN_PACING or len(t) <= HUMAN_SPLIT_CHARS:
+        return [t]
+    limit = HUMAN_SPLIT_CHARS
+    parts, cur = [], ""
+    for line in t.split("\n"):
+        while len(line) > limit:            # ek hi line bahut lambi -> todo
+            if cur:
+                parts.append(cur.rstrip())
+                cur = ""
+            cut = line.rfind(" ", 0, limit)
+            if cut < limit * 0.5:
+                cut = limit
+            parts.append(line[:cut].rstrip())
+            line = line[cut:].lstrip()
+        if cur and len(cur) + len(line) + 1 > limit:
+            parts.append(cur.rstrip())
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur.strip():
+        parts.append(cur.rstrip())
+    # 3 se zyada bubble spam lagte hain — baaki aakhri message me jodo.
+    if len(parts) > 3:
+        parts = parts[:2] + ["\n".join(parts[2:])]
+    return parts or [t]
+
+
+def _typing_delay(text: str) -> float:
+    """Sochne + type karne ka andaza: 0.4s + ~55 character per second."""
+    return min(HUMAN_MAX_DELAY, 0.4 + len(text or "") / 55.0)
+
+
+async def _send_human(bot, chat_id, text, reply_to=None):
+    """Jawab insaan ki tarah bhejo: thodi der typing, phir bubble."""
+    parts = _bubbles(text)
+    if not parts:
+        return
+    budget = HUMAN_MAX_DELAY
+    for i, part in enumerate(parts):
+        if HUMAN_PACING:
+            # Aakhri bubbles ke liye thodi jagah bacha kar rakho, warna pehla
+            # bubble poora budget kha jaata hai aur baaki turant gir jaate hain.
+            reserve = 0.3 * (len(parts) - 1 - i)
+            delay = min(max(0.0, budget - reserve), _typing_delay(part))
+            budget -= delay
+            if delay > 0:
+                try:
+                    await bot.send_chat_action(chat_id, "typing")
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
+        kw = {"reply_to_message_id": reply_to} if (reply_to and i == 0) else {}
+        await _safe(bot.send_message, chat_id, part, **kw)
+
+
 async def _known_chats_lines(context, me) -> list:
     """Bot jin chats me hai unki LIVE list (id, title, type, bot ka status,
     aur kaunse block se juda hai)."""
@@ -2526,6 +2700,10 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
                           update.effective_message.text):
         log.info("Duplicate message from %s — AI skip (dedupe).", user.id)
         return
+    # INVITE TIMING: turn gino, heavy mood note karo, "nahi" pakdo. Sab
+    # eligibility hai — sach me bolna hai ya nahi wo AI tay karti hai.
+    _note_turn(user.id, update.effective_message.text)
+    _note_decline(user.id, update.effective_message.text)
     if not _ai_allowed(user.id):
         _ai_stats["rate"] += 1
         await update.effective_message.reply_text(
@@ -2542,8 +2720,9 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     async with _typing(context, update.effective_chat.id):
         answer = await ask_ai(update.effective_message.text, where="a private chat",
                               mem_key=f"u{user.id}",
-                              note=_owner_note(user.id))
-    await _safe(update.effective_message.reply_text, answer)
+                              note=_owner_note(user.id),
+                              invite_uid=user.id)
+    await _send_human(context.bot, update.effective_chat.id, answer)
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2553,6 +2732,7 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         return
     learn_chat(update)
+    _note_turn(update.effective_user.id, msg.text)
     me = await _get_me(context)
     mentioned = False
     for e in (msg.entities or []):
@@ -2601,7 +2781,9 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mem_key=f"g{msg.chat.id}:u{update.effective_user.id}",
             note=_owner_note(update.effective_user.id),
         )
-    await _safe(msg.reply_text, answer)
+    # Group me invite jaan-boojh kar NAHI (invite_uid nahi bhejte) — wahan
+    # channel ki baat spam lagti hai. Timing/bubbles wahi insaan jaise.
+    await _send_human(context.bot, msg.chat.id, answer, reply_to=msg.message_id)
 
 
 # =====================================================================

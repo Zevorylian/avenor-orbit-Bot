@@ -68,7 +68,7 @@ arriving. Full verdicts in [AUDIT-RESPONSE.md](AUDIT-RESPONSE.md).
 ## 2026-10-31 — reliability and privacy pass
 
 Response to the production audit of the same date. Full mapping in
-[docs/AUDIT-RESPONSE.md](docs/AUDIT-RESPONSE.md).
+[AUDIT-RESPONSE.md](AUDIT-RESPONSE.md).
 
 ### Fixed
 
@@ -113,7 +113,7 @@ Response to the production audit of the same date. Full mapping in
 - `tests/` — 51 tests, and `.github/workflows/ci.yml` running `pyflakes`, `compileall`, an import smoke
   test, `pytest`, and a committed-secrets check.
 - `requirements.lock` (exact resolved versions), `requirements-dev.txt`.
-- `PRIVACY.md`, `docs/AUDIT-RESPONSE.md`, `docs/OPERATIONS.md`.
+- `PRIVACY.md`, `AUDIT-RESPONSE.md`, `OPERATIONS.md`.
 
 ### Changed
 
