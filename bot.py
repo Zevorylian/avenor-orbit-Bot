@@ -184,7 +184,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-24 · mahiru-persona-2"
+BOT_BUILD = "2026-11-24 · mahiru-persona-3"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -660,12 +660,66 @@ def _now_context() -> str:
     """
     now = datetime.now(_IST)
     h = now.hour
-    part = ("late night" if h < 5 else "early morning" if h < 8 else
-            "morning" if h < 12 else "afternoon" if h < 17 else
-            "evening" if h < 21 else "night")
+    # Din me waqt NAHI bhejte. Pehle har message ke saath "it is 1:04 PM
+    # (afternoon)" jaata tha, aur bot har baar "dopahar kaisi chal rahi hai?"
+    # poochh leti thi — screenshots me wahi loop tha. Insaan dopahar 1 baje
+    # waqt ka zikr nahi karta; 2am ka karta hai.
+    if 7 <= h < 22:
+        return ""
+    part = "late night" if h < 5 else "early morning"
     clock = now.strftime("%I:%M %p").lstrip("0")
     return (f"it is {clock} on {now.strftime('%A')} ({part}, IST) for the "
             f"person you are talking to")
+
+
+_DEV_RX = re.compile(r"[\u0900-\u097F]")
+_HINGLISH_RX = re.compile(
+    r"\b(hai|hoon|nahi|nahin|kya|kaise|kaisi|kaisa|tum|tumhe|tumhara|aap|mera|meri|"
+    r"tera|teri|accha|acha|theek|thik|karo|batao|bata|matlab|kuch|bahut|abhi|kal|aaj|"
+    r"yaar|bhai|dost|pyaar|mujhe|tujhe|hum|kyun|kyu|kaun|hoga|hogi|raha|rahi|rahe|"
+    r"gaya|gayi|lagta|lagti|bore|akela|akeli|udaas|khush|suno|bolo|chal|chalo)\b",
+    re.I)
+
+# Generic/robotic phrases — sirf LOG karne ke liye (user ko kuch nahi dikhta).
+# Inse pata chalta hai ki prompt ka "NEVER SAY" list asar kar raha hai ya nahi.
+_GENERIC_RX = re.compile(
+    r"(that'?s kind of you|i'?m here for you|i'?m always here|i understand how you feel|"
+    r"how can i help|anything else i can|let me know if you need|i hope this helps|"
+    r"take care of yourself|stay positive|great question|as an ai\b|as a language model|"
+    r"glad to be here with you|thank you for sharing)", re.I)
+
+
+def _lang_hint(text) -> str:
+    """User ki bhasha pakad kar AI ko saaf-saaf batao.
+
+    Prompt me "same language" pehle se likha tha, phir bhi Hinglish sawaal ka
+    jawab English me aa gaya (screenshot). Ye hint deterministic hai.
+    """
+    t = str(text or "")
+    if _DEV_RX.search(t):
+        return ("the person wrote in Hindi (Devanagari) — reply in Hindi, "
+                "same script")
+    if _HINGLISH_RX.search(t):
+        return ("the person wrote in Hinglish (Hindi words in Latin letters) — "
+                "reply in Hinglish, same style")
+    return ""
+
+
+def _last_question(history) -> str:
+    """Pichhle jawab ka aakhri sawaal — taaki wahi sawaal dobara na poochhe.
+
+    Screenshot me bot ne "dopahar kaisi chal rahi hai?" do message me poochha
+    tha. History me jawab hote hain, isliye wahan se sawaal nikaal kar context
+    me daal dete hain: "ye already poochha hai, dobara mat poochho".
+    """
+    for role, text in reversed(list(history or [])):
+        if role != "model":
+            continue
+        lines = [x.strip() for x in str(text).split("\n") if x.strip()]
+        for line in reversed(lines):
+            if line.endswith("?"):
+                return line[:140]
+    return ""
 
 
 async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
@@ -677,10 +731,20 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     invite_uid = eligible user ho to AI ko "darwaza khol sakti ho" ki
                  permission milti hai (timing ke rules prompt me hain)."""
     raw = prompt
+    history = _hist(mem_key) if mem_key is not None else []
     bits = []
     if where:
         bits.append(f"you are in {where}")
-    bits.append(_now_context())
+    now_bit = _now_context()
+    if now_bit:
+        bits.append(now_bit)
+    lang = _lang_hint(raw)
+    if lang:
+        bits.append(lang)
+    _q = _last_question(history)
+    if _q:
+        bits.append(f'you already asked them: "{_q}" — do not ask it again '
+                    f"and do not repeat that topic")
     if note:
         bits.append(note)
     # Chhota re-anchor: persona lambi baat-cheet me drift karti hai, isliye har
@@ -698,7 +762,6 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
             "said no, do not mention it at all. It is not required: if it does "
             "not fit, say nothing about it")
     prompt = f"(Context: {'; '.join(bits)}.)\n\n{prompt}"
-    history = _hist(mem_key) if mem_key is not None else []
     # ---- MODEL CHAIN -------------------------------------------------
     # Owner ka order: Gemma 4 26B -> Gemma 4 31B -> Gemini 2.5 Flash Lite
     # -> Gemini 3.1 Flash Lite -> Gemini 3 Flash. Chain khatam ho to (time
@@ -742,6 +805,10 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                                 or COMMUNITY_LINK.lower() in low
                                 or CHANNEL_LINK.lower() in low):
                             _mark_invited(invite_uid)
+                    _gm = _GENERIC_RX.search(text)
+                    if _gm:
+                        log.info("AI generic phrase aa gaya (%r) — prompt tune "
+                                 "karna hoga.", _gm.group(0))
                     _ai_stats["ok"] += 1
                     return text
                 last_err = last_err or "empty response"
