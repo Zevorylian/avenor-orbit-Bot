@@ -75,11 +75,16 @@ python bot.py
 With no `WEBHOOK_URL` set the bot long-polls, which is what you want locally. On Render it switches to
 webhook mode automatically.
 
-The test suite is optional. If you add `tests/`, `pytest.ini` and `requirements-dev.txt`, run it with:
+**This repository ships no test suite.** (`tests/`, `pytest.ini`, `requirements-dev.txt` and
+`.github/workflows/` are not in this repo — earlier docs mentioned them, that was wrong.) What you can
+run before every deploy is a build check, which catches the class of bug that takes a bot down at
+startup:
 
 ```bash
-pip install -r requirements-dev.txt
-python -m pytest
+pip install -r requirements.lock
+python -m py_compile bot.py config.py storage.py fonts.py   # syntax
+python -m pyflakes bot.py config.py storage.py fonts.py      # undefined names
+python -c "import bot; bot.build_application()"              # handlers build (needs BOT_TOKEN set)
 ```
 
 ---

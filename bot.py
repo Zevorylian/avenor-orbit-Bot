@@ -201,7 +201,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-24 · mahiru-persona-8"
+BOT_BUILD = "2026-11-24 · mahiru-persona-9"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1529,6 +1529,7 @@ _COMMANDS = [
     ("mongo",     "test the MongoDB connection",       "owner"),
     ("chats",     "every chat the bot is in",          "owner"),
     ("audience",  "who is in your audience, and from where", "owner"),
+    ("sync",      "re-check every chat the bot knows",    "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
     ("getid",     "get a chat's numeric ID",           "owner"),
     ("setid",     "bind a block to a chat ID",         "owner"),
@@ -2057,6 +2058,58 @@ async def cmd_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_long(update.effective_message, "\n".join(lines).strip())
 
 
+async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner: bot jin chats me hai, unhe dobara check karo aur id refresh karo.
+
+    Bot khud kisi chat me join NAHI kar sakta. Jab koi use add karta hai tab
+    `my_chat_member` update aata hai — par agar us waqt bot band tha (deploy),
+    to wo chat DB me aa hi nahi paati. /sync usi gap ko bharta hai: DB ke
+    saare chats + config ke ids par getChat chalata hai, title/id/status
+    refresh karta hai, aur batata hai kaunsa chat pahunch me hai.
+    """
+    if not await _need_owner(update):
+        return
+    me = await _get_me(context)
+    sc, bd = fonts.small_caps, fonts.bold
+    targets, seen = [], set()
+    for c in db_get_chats().values():
+        cid = c.get("id")
+        if cid is not None and str(cid) not in seen:
+            seen.add(str(cid))
+            targets.append((str(cid), c.get("title") or "?"))
+    for blk in LINK_BLOCKS:
+        cid = blk.get("id") or _learned_ids().get(blk["name"])
+        if cid and str(cid) not in seen:
+            seen.add(str(cid))
+            targets.append((str(cid), blk["name"]))
+    out = [bd("SYNC"), ""]
+    if not targets:
+        out.append(sc("nothing to check yet — add the bot to a group first"))
+        await _send_long(update.effective_message, "\n".join(out))
+        return
+    ok = bad = 0
+    for cid, label in targets:
+        try:
+            ch = await context.bot.get_chat(cid)
+            bm = await context.bot.get_chat_member(chat_id=ch.id, user_id=me.id)
+            db_upsert_chat(ch.id, ch.title or "", str(ch.type or ""), bm.status)
+            b = match_block_by_title(ch.title or "")
+            if b:
+                db_set_chat_id(b["name"], ch.id)
+            out.append(f"✅ {ch.title or label}")
+            out.append(f"   {sc('id')} {ch.id}   {sc('bot')} {bm.status}")
+            ok += 1
+        except Exception as e:
+            out.append(f"❌ {label} — {_err_hint(e)}")
+            bad += 1
+    out += ["", f"{sc('reachable')}: {bd(str(ok))}   {sc('failed')}: {bd(str(bad))}"]
+    if bad:
+        out.append("")
+        out.append(f"{sc('failed ka matlab')}: bot us chat me nahi hai, ya id galat hai.")
+        out.append(f"{sc('fix')}: us chat me bot ko add/admin banao — id khud aa jayegi.")
+    await _send_long(update.effective_message, "\n".join(out))
+
+
 async def cmd_audience(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner: audience ka SACH, aur Telegram ki asli hadd.
 
@@ -2225,8 +2278,10 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('ready')}  : {bd('200') if _st['durable'] else bd('503 (not durable)')}",
            f"{sc('doc size')} : {bd(f'{_doc_kb:.0f} KB')} {sc('of 16384 KB')}",
            f"{sc('gate')}   : {bd('READY') if gate_ok else bd('NOT READY')}",
-           f"{sc('guest')}  : {bd('ON') if GUEST_MODE else bd('OFF')} "
-           f"{sc('(BotFather me bhi ON hona chahiye)')}",
+           f"{sc('guest')}  : {bd('ON') if GUEST_MODE else bd('OFF')} — "
+           f"{sc('BotFather')}: {bd('supported') if getattr(me, 'supports_guest_queries', False) else bd('NOT enabled')}",
+           f"{sc('privacy')} : {bd('off (bot sees all group messages)') if getattr(me, 'can_read_all_group_messages', False) else bd('on (only mentions and replies)')}",
+           f"{sc('groups')} : {bd('can be added') if getattr(me, 'can_join_groups', True) else bd('BLOCKED — BotFather me groups off hain')}",
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
            f"{sc('ai calls')} : {bd(str(_ai_stats['calls']))} "
@@ -3231,13 +3286,20 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Group/channel mein AI SIRF @mention par chalta hai (private mein bina
-    mention)."""
+    """Group/channel mein AI @mention par chalta hai — aur bot ke message ka
+    reply bhi mention ke barabar hai (insaan reply se hi baat karta hai)."""
     msg = update.effective_message
-    if not msg or not msg.text:
+    if not msg:
         return
+    # Photo/document par bhi mention ho sakta hai — tab text nahi, caption
+    # hota hai. Pehle sirf msg.text dekha jaata tha, isliye photo par mention
+    # chup-chaap ignore ho jata tha.
+    text = msg.text or msg.caption or ""
+    if not text:
+        return
+    entities = msg.entities or msg.caption_entities or []
     learn_chat(update)
-    _note_message(update.effective_user.id, msg.text)
+    _note_message(update.effective_user.id, text)
     # Jo group me bolta hai, wo ledger me aa jata hai (throttled — har message
     # par DB write nahi).
     _k = (msg.chat.id, update.effective_user.id)
@@ -3246,21 +3308,34 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _prune(_aud_seen, 5000)
         _note_audience(msg.chat.id, update.effective_user, src="message")
     me = await _get_me(context)
+    _uname = f"@{me.username.lower()}"
     mentioned = False
-    for e in (msg.entities or []):
+    # (a) bot ke message ka reply = mention
+    _r = msg.reply_to_message
+    if _r is not None and getattr(_r.from_user, "id", None) == me.id:
+        mentioned = True
+    # (b) asli @mention / text_mention
+    for e in entities:
         if e.type == "mention":
             # Telegram ke offset/length UTF-16 code units me hote hain, Python
             # string ke code points me NAHI. Emoji ya koi bhi non-BMP character
             # ho to seedha slicing galat hoti hai aur mention miss ho jata hai.
             # parse_entity() PTB ka offset-safe helper hai.
             try:
-                if msg.parse_entity(e).lower() == f"@{me.username.lower()}":
+                if msg.parse_entity(e).lower() == _uname:
                     mentioned = True
             except Exception:
-                if msg.text[e.offset:e.offset + e.length].lower() == f"@{me.username.lower()}":
+                # parse_entity caption par RuntimeError deta hai; aur slice me
+                # aage-peeche space aa sakta hai — strip zaroori hai.
+                if text[e.offset:e.offset + e.length].strip().lower() == _uname:
                     mentioned = True
         elif e.type == "text_mention" and e.user and e.user.id == me.id:
             mentioned = True
+    # Aakhri safety: entity kisi wajah se miss ho gayi (caption, emoji offset,
+    # ya client ne entity bheji hi nahi) to seedha username dhoondh lo. Isse
+    # mention chup-chaap ignore nahi hota.
+    if not mentioned and _uname in text.lower():
+        mentioned = True
     if not mentioned:
         return
     # Group/channel me gate NAHI — wahan seedha jawab do (gate sirf DM me).
@@ -3280,11 +3355,11 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _safe(msg.reply_text, budget_message())
         return
     # Wahi message dobara mention hua -> dobara jawab na do.
-    if _is_duplicate_text(msg.chat.id, update.effective_user.id, msg.text):
+    if _is_duplicate_text(msg.chat.id, update.effective_user.id, text):
         log.info("Duplicate mention in %s — AI skip (dedupe).", msg.chat.id)
         return
     _ai_count(msg.chat.id)
-    prompt = _strip_mention(msg.text, me.username) or "The user mentioned you. Greet them warmly."
+    prompt = _strip_mention(text, me.username) or "The user mentioned you. Greet them warmly."
     title = _clean_title(msg.chat.title)
     where = f'the Telegram group "{title}"' if title else "a Telegram group"
     async with _typing(context, update.effective_chat.id):
@@ -4510,6 +4585,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("mongo", cmd_mongo))
     app.add_handler(CommandHandler("chats", cmd_chats))
     app.add_handler(CommandHandler("audience", cmd_audience))
+    app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("perms", cmd_perms))

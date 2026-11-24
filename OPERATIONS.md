@@ -139,12 +139,14 @@ service was asleep on Render Free, expect the post to arrive late, not never.
 
 ## Deploying a change
 
-1. `pip install -r requirements-dev.txt`
-2. `python -m pytest` — must be green
-3. `python -m pyflakes bot.py config.py storage.py fonts.py tests/` — must be silent
-4. Deploy
-5. `/diag` — storage `READY`, gate as expected
-6. `/health` — `status: ok`
+1. `pip install -r requirements.lock`
+2. `python -m py_compile bot.py config.py storage.py fonts.py` — must be silent
+3. `python -m pyflakes bot.py config.py storage.py fonts.py` — must be silent
+4. `BOT_TOKEN=... python -c "import bot; bot.build_application()"` — must not raise
+   (this repo has no `tests/` directory; these four checks are the whole gate)
+5. Deploy
+6. `/diag` — storage `READY`, gate as expected
+7. `/health` — `status: ok`
 
 Never deploy with a failing test to "fix it afterwards"; the persistence path is the one thing you
 cannot repair after the fact.

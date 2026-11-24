@@ -1,5 +1,10 @@
 # Audit response — what changed, and what is still open
 
+> **Repository note (24 Nov 2026):** this repository does not contain the `tests/` directory,
+> `requirements-dev.txt` or `.github/workflows/ci.yml` that the audit below refers to. Wherever this
+> document says "51 tests" or "CI", read it as *the checks that were run when the fix was made* — they
+> are not shipped here. `README.md` and `OPERATIONS.md` now list the checks you can actually run.
+
 This document answers the production audit of 31 October 2026 line by line. Every finding has a
 verdict: **Fixed**, **Partly fixed**, or **Open**, with the reason. Nothing is marked fixed unless the
 code was changed and a test covers it.
