@@ -474,11 +474,19 @@ def _restore_dedupe(doc) -> None:
 
 
 def _write_mirror() -> None:
-    """Local JSON safety copy (fsync ke bina) — thread me chalta hai."""
+    """Local JSON safety copy (fsync ke bina) — thread me chalta hai.
+
+    Wahi .tmp file aur wahi lock jo db_write_json() use karta hai. Pehle ye
+    lock ke bahar likhta tha, isliye mirror aur ek asli write ek saath chalne
+    par os.replace FileNotFoundError de sakta tha (wahi race jo changelog me
+    'fixed' likha hai — mirror wali jagah bachi hui thi).
+    """
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-    with open(DB_PATH + ".tmp", "w", encoding="utf-8") as f:
-        json.dump(db_load(), f, ensure_ascii=False)
-    os.replace(DB_PATH + ".tmp", DB_PATH)
+    with _json_write_lock:
+        tmp = DB_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(db_load(), f, ensure_ascii=False)
+        os.replace(tmp, DB_PATH)
 
 
 def doc_size_bytes(data) -> int:
@@ -525,6 +533,22 @@ def _shrink(data) -> list:
         data["audit"] = audit[-AUDIT_KEEP:]
         notes.append(f"audit -> {len(data['audit'])}")
     return notes
+
+
+def _reset_caches():
+    """State reload hui -> memory caches bhi naye state se banao.
+
+    Pehle connect() sirf _db_cache badalta tha. Ban / done / requests /
+    learned-chat-ids ke caches purane state par hi chalte rehte the, isliye
+    reconnect ke baad koi banned user bina ban ke chalta reh sakta tha aur
+    gate purani (delete ho chuki) chat id par check karta reh sakta tha.
+    None karne se agli baar DB se dobara bante hain.
+    """
+    global _ban_cache, _done_cache, _requests_cache, _chat_ids_cache
+    _ban_cache = None
+    _done_cache = None
+    _requests_cache = None
+    _chat_ids_cache = None
 
 
 async def connect() -> bool:
@@ -580,6 +604,7 @@ async def connect() -> bool:
         _reconnect_attempt = 0
         _next_retry_at = 0.0
         _dirty = False
+        _reset_caches()          # ban / done / requests / learned ids naye state se
         return True
     except Exception as e:
         global _last_err
@@ -918,7 +943,9 @@ def db_add_user(user, bump_start=False):
         if is_new:
             entry["joined_at"] = _now()
         data["users"][uid] = entry
-        if bump_start:
+        if bump_start and is_new:
+            # Sirf pehli baar — repeat /start se counter nahi badhna chahiye
+            # (warna 'started' ka number users se bada ho jata hai).
             data["stats"]["total_started"] = data["stats"].get("total_started", 0) + 1
         db_save(data)
         return is_new

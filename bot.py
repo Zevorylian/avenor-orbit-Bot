@@ -143,6 +143,7 @@ from config import (
     AI_DAILY_MAX,
     AI_GROUP_DAILY_MAX,
     AI_TIMEOUT,
+    AI_TOTAL_BUDGET,
     AI_CONCURRENCY,
     AI_TYPING_EVERY,
     AI_NOTICE_COOLDOWN,
@@ -574,8 +575,16 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     models = [AI_MODEL_LITE, AI_MODEL] if lite else [AI_MODEL, AI_MODEL_LITE]
     last_err = None
     _ai_stats["calls"] += 1
+    # POORA intezaar ek hadd me: 2 model x 2 koshish x AI_TIMEOUT = 3 minute tak
+    # ja sakta tha, aur user tab tak chala jaata tha. Ab total deadline hai.
+    deadline = time.monotonic() + max(1, AI_TOTAL_BUDGET)
     for model in models:
+        if deadline - time.monotonic() <= 2:
+            break
         for attempt in range(2):
+            left = deadline - time.monotonic()
+            if left <= 2:
+                break
             try:
                 # ZAROORI (user ki shikayat: "jawab kabhi aata nahi"):
                 # pehle is call par koi timeout hi nahi tha. Provider atak
@@ -586,7 +595,7 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                 async with _ai_limiter():
                     text = await asyncio.wait_for(
                         asyncio.to_thread(_run_ai, model, prompt, history),
-                        timeout=max(1, AI_TIMEOUT))
+                        timeout=max(1, min(AI_TIMEOUT, left)))
                 if text:
                     text = _strip_md(text)      # markdown hatao (* aur ` )
                     if len(text) > AI_MAX_CHARS:
@@ -1007,7 +1016,7 @@ def build_welcome(member, chat_title: str) -> str:
         f"{sc('Welcome')}, {b(name)}\n\n"
         f"{sc('You have joined')} {b(chat_title or 'the group')}\n\n"
         f"{sc('Name')}   : {b(full)}\n"
-        f"{sc('ID')}     : {b(str(member.id))}\n"
+        f"{sc('ID')}     : {member.id}\n"   # plain digits — copy karke config me daal sakein
         f"{sc('Joined')} : {b(_today())}\n\n"
         f"{sc('Ask anything any time')} — {b(BOT_BRAND)} {sc('is here to help')}."
     )
@@ -1292,8 +1301,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ID PLAIN digits me — bold font math digits (𝟱𝟱𝟱) deta tha, jinhe copy
+    # karke OWNER_ID / ADMIN_IDS me daalne par int() fail karta tha.
     await update.effective_message.reply_text(
-        f"{fonts.small_caps('Your Telegram ID')}: {fonts.bold(str(update.effective_user.id))}"
+        f"{fonts.small_caps('Your Telegram ID')}: {update.effective_user.id}"
     )
 
 
@@ -1326,7 +1337,9 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s = db_stats()
     out = [bd("STATS"), "", bd("YOUR BOT"), ""]
     out.append(f"{sc('users who started')} : {bd(str(s['total_users']))}")
-    out.append(f"{sc('reachable by DM')}   : {bd(str(max(0, s['total_users'] - s['banned'])))}")
+    # "reachable by DM" jhooth tha: jin logon ne bot block kar diya hai wo bhi
+    # isi ginti me aate hain. Ab wahi likha hai jo sach me pata hai.
+    out.append(f"{sc('users not banned')}   : {bd(str(max(0, s['total_users'] - s['banned'])))}")
     out.append(f"{sc('banned')}            : {bd(str(s['banned']))}")
     out.append(f"{sc('/start count')}     : {bd(str(s['total_started']))}")
     out.append(f"{sc('referrals')}         : {bd(str(s['referrals']))}")
@@ -1384,7 +1397,7 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sc, bd = fonts.small_caps, fonts.bold
         out = [bd("BROADCAST"), "",
                f"{sc('total users')}      : {bd(str(s['total_users']))}",
-               f"{sc('reachable by DM')}  : {bd(str(max(0, s['total_users'] - s['banned'])))}",
+               f"{sc('users not banned')}  : {bd(str(max(0, s['total_users'] - s['banned'])))}",
                f"{sc('banned (skipped)')} : {bd(str(s['banned']))}",
                f"{sc('total started')}    : {bd(str(s['total_started']))}",
                "",
@@ -2253,6 +2266,9 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.approve_chat_join_request(chat_id=chat.id, user_id=usr.id)
         log.info("Join request auto-approved: %s (%s)", usr.full_name, usr.id)
     except Exception as e:
+        # Approve nahi hua -> request record bhi hata do. Warna gate us user
+        # ko 'joined' maan leta tha jabki wo chat me hai hi nahi.
+        db_del_request(usr.id, chat.id)
         log.warning("Join auto-approve fail (%s): %s", chat.id, e)
 
 
@@ -2286,6 +2302,11 @@ async def on_guest_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(msg.chat_id, "typing")
     except Exception:
         pass
+    # Per-user rate limit guest mode me bhi lagu — pehle sirf roz ka budget
+    # dekha jaata tha, isliye ek user guest mode me flood kar sakta tha.
+    if user and not _ai_allowed(user.id):
+        _ai_stats["rate"] += 1
+        return
     if _ai_budget_blocked(msg.chat_id):
         _ai_stats["budget"] += 1
         return
@@ -2573,7 +2594,9 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{sc('chat')} : {msg.chat.title or 'private'} [{msg.chat.id}]\n"
         f"{sc('msg')}  : {(r.text or r.caption or '[media]')[:300]}"
     )
-    targets = list(ADMIN_IDS) or ([OWNER_ID] if OWNER_ID else [])
+    targets = list(ADMIN_IDS)
+    if OWNER_ID and OWNER_ID not in targets:
+        targets.insert(0, OWNER_ID)   # owner ko report hamesha mile
     sent = 0
     for a in targets:
         try:
@@ -3144,6 +3167,14 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             "No channels configured. Set POST_CHANNELS in config.py first.")
         return
+    # Flow ke saare sawaal DM me poochhe jaate hain (jawab sirf private
+    # message handler uthata hai). Group me /post chalane par bot har field
+    # par chup ho jata tha — ab saaf-saaf DM par bhej dete hain.
+    if update.effective_chat.type != ChatType.PRIVATE:
+        await update.effective_message.reply_text(
+            f"The post builder runs in a private chat. Message me here: "
+            f"@{context.bot.username} — then send /{POST_COMMAND} there.")
+        return
     _post_flow.pop(update.effective_user.id, None)
     kb = InlineKeyboardMarkup(
         [[_btn(t, callback_data=f"posttype:{t}", style="primary")] for t in POST_TYPES])
@@ -3249,15 +3280,24 @@ async def _post_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+# DM me text ke alawa jo bhi aaye — chup nahi rehna hai.
+NO_MEDIA_TEXT = ("i can only read text right now — write your question "
+                 "and i will answer.")
+
+
 async def on_private_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Private chat me photo — agar /post flow chal raha hai to banner maano."""
     user = update.effective_user
+    msg = update.effective_message
     fl = _post_flow.get(user.id)
     if not fl or not fl.get("await_image"):
+        # Pehle yahan chup-chaap return hota tha: user photo bhejta tha aur
+        # bot bilkul kuch nahi kehta tha (lagta tha bot mar gaya hai).
+        await _safe(msg.reply_text, NO_MEDIA_TEXT)
         return
-    msg = update.effective_message
     photos = getattr(msg, "photo", None) or []
     if not photos:
+        await _safe(msg.reply_text, NO_MEDIA_TEXT)
         return
     fl["image"] = photos[-1].file_id
     fl.pop("await_image", None)
@@ -3270,7 +3310,18 @@ async def on_private_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _post_ask(update.effective_chat.id, context, user.id)
 
 
-CAPTION_LIMIT = 1024      # Telegram ki caption limit
+async def on_private_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """DM me sticker / voice / file / video — chup-chaap ignore mat karo."""
+    msg = update.effective_message
+    fl = _post_flow.get(update.effective_user.id)
+    if fl is not None and fl.get("await_image"):
+        await _safe(msg.reply_text, "Send the banner as a photo, or type skip.")
+        return
+    await _safe(msg.reply_text, NO_MEDIA_TEXT)
+
+
+CAPTION_LIMIT = 1024      # Telegram ki caption limit (photo ke saath)
+TEXT_LIMIT = 3800         # bina photo wale post ke liye (send_message 4096 deta hai)
 _TAG_ROOM = 40            # closing tags ke liye jagah
 
 
@@ -3306,7 +3357,7 @@ def _badge_pad(plain: str) -> str:
     return " " * max(0, pad)
 
 
-def _fit_caption(cap: str) -> str:
+def _fit_caption(cap: str, limit: int = CAPTION_LIMIT) -> str:
     """1024 limit — line par kaato AUR koi HTML tag adhoora na chhode.
 
     Line par kaatna kaafi nahi hai: <blockquote> kai lines par phaila hota
@@ -3318,9 +3369,9 @@ def _fit_caption(cap: str) -> str:
     aur tab bhi Telegram reject karta. Isliye content ke liye 40 character
     pehle hi rok dete hain.
     """
-    if len(cap) <= CAPTION_LIMIT:
+    if len(cap) <= limit:
         return cap
-    budget = CAPTION_LIMIT - _TAG_ROOM
+    budget = limit - _TAG_ROOM
     keep, total = [], 0
     for line in cap.split("\n"):
         add = len(line) + (1 if keep else 0)
@@ -3337,7 +3388,7 @@ def _fit_caption(cap: str) -> str:
         opens = out.count(f"<{tag}") - out.count(f"</{tag}>")
         out += f"</{tag}>" * max(0, opens)
     # aakhri safety: tag band karne ke baad bhi limit ke andar raho.
-    return out[:CAPTION_LIMIT]
+    return out[:limit]
 
 
 async def _post_send_one(context, cid, p, cap, kb, html=True):
@@ -3364,7 +3415,11 @@ async def _send_post(context, code):
         url=_deep_link(context, code), style="primary")]])
     ep = p.get("ep_line") or await _ep_line(p)
     deep = _deep_link(context, code)
-    cap = _fit_caption(_post_caption(p, ep, deep))
+    # Photo wale post par Telegram ki caption limit 1024 hai; bina photo wale
+    # post send_message se jaate hain jahan 4096 allowed hai. Pehle dono 1024
+    # par kat jaate the, isliye lamba text-only post chup-chaap adhoora jaata tha.
+    limit = CAPTION_LIMIT if p.get("image") else TEXT_LIMIT
+    cap = _fit_caption(_post_caption(p, ep, deep), limit)
     chans = p.get("channel_ids") or ([p["channel_id"]] if p.get("channel_id") else [])
     ok = False
     failed = []
@@ -3376,7 +3431,7 @@ async def _send_post(context, code):
             log.warning("Post fail (%s): %s", cid, e)
             failed.append(cid)
     if failed:
-        plain = _fit_caption(_post_caption(p, ep, deep, text_links=False))
+        plain = _fit_caption(_post_caption(p, ep, deep, text_links=False), limit)
         still = []
         for cid in failed:
             try:
@@ -3737,6 +3792,12 @@ def build_application() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS, on_group_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, on_private_message))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, on_private_photo))
+    # Photo ke alawa sticker / voice / file / video — in par bhi ek saaf jawab,
+    # warna user ko lagta tha bot ne suna hi nahi.
+    app.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & (filters.VOICE | filters.STICKER | filters.DOCUMENT
+                                    | filters.VIDEO | filters.AUDIO | filters.VIDEO_NOTE),
+        on_private_media))
 
     # Group 1: jo bhi group update group 0 me handle na ho (photo, sticker,
     # command, koi bhi cheez) — sirf chat yaad rakhne ke liye. Isse bot ko
