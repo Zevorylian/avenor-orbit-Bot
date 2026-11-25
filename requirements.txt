@@ -10,3 +10,8 @@ python-dotenv>=1.2.2,<2
 # Durable storage. 4.9 se pymongo me AsyncMongoClient aaya (Motor deprecated
 # hai — May 2026). 4.9 se pehle async support hi nahi hai.
 pymongo>=4.9,<5
+
+# MTProto roster (/members) ke liye. Optional feature hai, par package yahan
+# hi rakha hai taaki Render par ek hi build me chal jaye. Ye bot token se
+# login karta hai (api_id/api_hash config se), user account nahi.
+telethon>=1.36,<2

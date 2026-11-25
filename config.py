@@ -482,6 +482,15 @@ EPHEMERAL_WELCOME = _bool_env("EPHEMERAL_WELCOME", True)
 # tareeka hai.
 REACTION_TRACK = _bool_env("REACTION_TRACK", True)
 
+# ---- MTProto ROSTER (optional, default OFF) --------------------------
+# Bot API member list nahi deta. MTProto ka channels.getParticipants
+# officially bot-callable hai — par uske liye api_id + api_hash chahiye
+# (my.telegram.org > API development tools) aur `telethon` package.
+# Dono na ho to feature OFF rehta hai, bot normal chalta hai.
+TG_API_ID = _int_env("TG_API_ID", 0)
+TG_API_HASH = (os.getenv("TG_API_HASH") or "").strip()
+ROSTER_MAX = _int_env("ROSTER_MAX", 200)
+
 # ---- GROWTH: join-request funnel -------------------------------------
 # SABSE BADA raasta (Bot API 5.5+): jab koi channel/group join REQUEST
 # bhejta hai jahan bot admin hai (can_invite_users), to Telegram bot ko

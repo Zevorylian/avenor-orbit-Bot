@@ -83,6 +83,7 @@ from google import genai
 from google.genai import types
 
 import fonts
+import roster
 from config import (
     BOT_TOKEN,
     BOT_USERNAME,
@@ -201,7 +202,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-11"
+BOT_BUILD = "2026-11-25 · mahiru-persona-12"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1538,6 +1539,7 @@ _COMMANDS = [
     ("chats",     "every chat the bot is in",          "owner"),
     ("audience",  "who is in your audience, and from where", "owner"),
     ("sync",      "re-check every chat the bot knows",    "owner"),
+    ("members",   "real member list (needs MTProto setup)", "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
     ("getid",     "get a chat's numeric ID",           "owner"),
     ("setid",     "bind a block to a chat ID",         "owner"),
@@ -1566,19 +1568,21 @@ def _owner_actions() -> dict:
         "broadcast": cmd_broadcast, "btnstyle": cmd_btnstyle,
         "admins": cmd_admins, "perms": cmd_perms, "getid": cmd_getid,
         "setid": cmd_setid, "ban": cmd_ban, "unban": cmd_unban,
+        "members": cmd_members,
     }
 
 
 def _owner_panel_kb() -> InlineKeyboardMarkup:
     acts = ["stats", "diag", "chats", "audience", "sync", "mongo",
             "links", "posts", "audit", "broadcast", "btnstyle", "admins",
-            "perms", "getid", "setid", "ban", "unban"]
+            "perms", "getid", "setid", "ban", "unban", "members"]
     labels = {"stats": "📊 Stats", "diag": "🩺 Diag", "chats": "💬 Chats",
               "audience": "👥 Audience", "sync": "🔄 Sync", "mongo": "🗄 Mongo",
               "links": "🔗 Links", "posts": "📝 Posts", "audit": "🧾 Audit",
               "broadcast": "📣 Broadcast", "btnstyle": "🎨 Buttons",
               "admins": "🛡 Admins", "perms": "🔑 Perms", "getid": "🆔 Get ID",
-              "setid": "📌 Set ID", "ban": "⛔ Ban", "unban": "✅ Unban"}
+              "setid": "📌 Set ID", "ban": "⛔ Ban", "unban": "✅ Unban",
+              "members": "📇 Members"}
     rows, row = [], []
     for a in acts:
         row.append(_btn(labels.get(a, a), callback_data=f"owner:{a}",
@@ -2125,6 +2129,63 @@ async def cmd_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_long(update.effective_message, "\n".join(lines).strip())
 
 
+async def cmd_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner: is chat ke members ki ASLI list (MTProto roster).
+
+    Bot API poora member list kabhi nahi deta. MTProto ka
+    `channels.getParticipants` officially bot-callable hai — par uske liye
+    api_id/api_hash + `telethon` chahiye, aur bot ko us chat me ADMIN hona
+    chahiye. Ye read-only list hai: isse DM nahi bhejte.
+    """
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    why = roster.available()
+    if why == "not configured":
+        await update.effective_message.reply_text(
+            f"{bd('ROSTER OFF')}\n\n"
+            f"{sc('3 cheezein chahiye')}:\n"
+            f"1) my.telegram.org > API development tools > app banao "
+            f"-> api_id + api_hash milenge\n"
+            f"2) Render > Environment: TG_API_ID, TG_API_HASH\n"
+            f"3) requirements me telethon add karo\n\n"
+            f"{sc('ye feature optional hai — iske bina bot normal chalta hai')}")
+        return
+    if why:
+        await update.effective_message.reply_text(
+            f"{bd('ROSTER OFF')} — {why}\n\n"
+            f"{sc('requirements me telethon add karke redeploy karo')}.")
+        return
+    chat = update.effective_chat
+    if str(chat.type) not in ("group", "supergroup", "channel"):
+        await update.effective_message.reply_text(
+            f"{sc('ye command kisi group/channel ke andar chalao')}.")
+        return
+    limit = 50
+    if context.args:
+        try:
+            limit = max(1, min(int(context.args[0]), 200))
+        except ValueError:
+            pass
+    rows, err = await roster.fetch_members(chat.id, limit)
+    if err:
+        await update.effective_message.reply_text(f"{bd('FAIL')} — {err}")
+        return
+    if not rows:
+        await update.effective_message.reply_text(f"{sc('koi member nahi mila')}.")
+        return
+    out = [bd("MEMBERS"),
+           f"{sc('chat')} : {chat.title or chat.id}",
+           f"{sc('showing')} : {len(rows)}", ""]
+    for r in rows:
+        tag = f"@{r['username']}" if r["username"] else "-"
+        mark = " [bot]" if r["bot"] else ""
+        out.append(f"{r['name'] or '-'}{mark}")
+        out.append(f"   {sc('id')} {r['id']}   {tag}")
+    out += ["", f"{sc('read-only')} — {sc('isse koi DM nahi jata')}"]
+    await _send_long(update.effective_message, "\n".join(out))
+
+
 async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner: bot jin chats me hai, unhe dobara check karo aur id refresh karo.
 
@@ -2351,6 +2412,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('groups')} : {bd('can be added') if getattr(me, 'can_join_groups', True) else bd('BLOCKED — BotFather me groups off hain')}",
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
+           f"{sc('roster')} : {bd('ready') if not roster.available() else roster.available()}",
            f"{sc('dm sent')} : {bd(str(_eph_stats['sent']))} "
            f"({sc('skip admin')} {_eph_stats['skip_admin']}, "
            f"{sc('unknown')} {_eph_stats['skip_unknown']}, "
@@ -4761,6 +4823,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("chats", cmd_chats))
     app.add_handler(CommandHandler("audience", cmd_audience))
     app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(CommandHandler("members", cmd_members))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("perms", cmd_perms))
@@ -5022,6 +5085,10 @@ async def _on_shutdown(app: Application):
         _mongo_task.cancel()
         _mongo_task = None
     await storage_close()
+    try:
+        await roster.close()      # MTProto client (agar chalu tha)
+    except Exception:
+        pass
 
 
 async def _polling_post_init(app: Application):
