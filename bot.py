@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-23"
+BOT_BUILD = "2026-11-25 · mahiru-persona-24"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1455,10 +1455,13 @@ async def _set_commands(app: Application):
     # MEMBER ko sirf 6 commands dikhte hain — baaki sab menu se gayab.
     # (Handlers waise hi kaam karte hain, par menu saaf rehta hai.)
     member = [_bc(c) for c in _MEMBER_MENU]
-    # ADMIN ko member ke + group ke tools.
-    admin = member + [_bc(c) for c in _ADMIN_MENU]
-    # OWNER ko sirf member + /owner — poora control ek hi command ke andar.
-    owner = member + [_bc("owner")]
+    # ADMIN ko member ke + group ke tools + /admin panel.
+    admin = member + [_bc(c) for c in _ADMIN_MENU] + [_bc("admin")]
+    # OWNER ko SAB kuch — aur /admin, /owner ke thik UPAR.
+    owner = member + [_bc(c) for c in _ADMIN_MENU]
+    owner += [_bc(c) for c, d, r in _COMMANDS
+              if r == "owner" and c not in ("owner", "admin")]
+    owner += [_bc("admin"), _bc("owner")]
     try:
         await app.bot.set_my_commands(member, scope=BotCommandScopeDefault())
         log.info("Commands menu set (%s default commands).", len(member))
@@ -2895,6 +2898,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Ye type tumhare liye nahi hai", show_alert=False)
             log.warning("Post type blocked: %s tried %r", user.id, t)
             return
+        if _sc == "admin":
+            # LINK FLOW — seedha link maango, koi channel/poster nahi.
+            _post_flow[user.id] = {"type": t, "mode": "link", "step": 0,
+                                   "data": {}, "channels": [],
+                                   "scope": "admin", "_t": time.time()}
+            try:
+                await q.edit_message_text(f"{t} — let us begin.")
+            except Exception:
+                pass
+            await _safe(
+                context.bot.send_message, update.effective_chat.id,
+                f"{fonts.bold('Link bhejo')}\n"
+                f"{fonts.small_caps('bas link — koi banner, koi naam nahi')}")
+            return
         if not _channels_for(user.id, _sc):
             await q.answer("Koi channel set nahi hai", show_alert=True)
             return
@@ -4298,12 +4315,10 @@ _post_scope: dict = {}
 
 
 def _admin_panel_kb(uid) -> InlineKeyboardMarkup:
-    rows = [[_btn("📝 Post", callback_data="admpanel:post", style="primary"),
-             _btn("📄 Posts", callback_data="admpanel:posts", style="primary")]]
-    if is_owner(uid):
-        rows.append([_btn("👑 Owner panel", callback_data="ownerpanel",
-                          style="success")])
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup([[
+        _btn("📝 Post", callback_data="admpanel:post", style="primary"),
+        _btn("📄 Posts", callback_data="admpanel:posts", style="primary"),
+    ]])
 
 
 async def cmd_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4718,18 +4733,15 @@ def _channel_rows(sel, channels=None) -> list:
     return rows
 
 
-def _post_types_for(uid, scope=None) -> list:
-    """Owner -> saare post types. Admin -> sirf Upload (anime/movie).
+# Admin ka kaam sirf LINK banana hai — do blocks: Anime / Movie.
+LINK_TYPES = ["Anime", "Movie"]
 
-    scope="admin" (/admin panel se aaya) -> sirf Upload, owner ke liye bhi,
-    kyunki wo "admin ka kaam" hai.
-    """
-    if scope == "admin":
-        return ["Upload"] if "Upload" in POST_TYPES else list(POST_TYPES[:1])
-    if is_owner(uid):
+
+def _post_types_for(uid, scope=None) -> list:
+    """Owner -> poora post builder. Admin -> sirf Anime / Movie (link flow)."""
+    if is_owner(uid) and scope != "admin":
         return list(POST_TYPES)
-    allowed = [t for t in POST_TYPES if t == "Upload"]
-    return allowed or ["Upload"]
+    return list(LINK_TYPES)
 
 
 def _channels_for(uid, scope=None) -> list:
@@ -4740,12 +4752,10 @@ def _channels_for(uid, scope=None) -> list:
     Khali ho to kuch nahi — fail-closed, warna admin owner ke channel me
     post kar deta hai.
     """
-    if scope == "admin":
-        return [list(ADMIN_CHANNELS)] if ADMIN_CHANNELS else []
-    if is_owner(uid):
+    if is_owner(uid) and scope != "admin":
         return POST_CHANNELS
-    if ADMIN_CHANNELS:
-        return [list(ADMIN_CHANNELS)]
+    # Admin (aur /admin panel se aaya koi bhi) channel me post NAHI karta —
+    # wo sirf link banata hai. Isliye yahan koi channel nahi.
     return []
 
 
@@ -4777,19 +4787,15 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_privileged(update.effective_user.id):
         return
     uid = update.effective_user.id
-    _scope = _post_scope.get(uid)
-    _ch = _channels_for(uid, _scope)
-    if not _ch:
-        # Admin ke liye alag message — owner ko pata chale ki kya karna hai.
-        if is_owner(uid):
+    # Admin (aur /admin panel) = LINK FLOW: sirf Anime/Movie -> Link -> bot ka
+    # link. Koi banner, koi naam, koi channel, koi post NAHI.
+    _scope = "admin" if not is_owner(uid) else _post_scope.pop(uid, None)
+    if _scope != "admin":
+        _ch = _channels_for(uid, _scope)
+        if not _ch:
             await update.effective_message.reply_text(
                 "No channels configured. Set POST_CHANNELS in config.py first.")
-        else:
-            await update.effective_message.reply_text(
-                f"{fonts.bold('No channels for you yet')}\n\n"
-                f"{fonts.small_caps('owner ko bolo')}: Render > Environment me "
-                f"ADMIN_CHANNELS=Naam=@channel daalein.")
-        return
+            return
     # Flow ke saare sawaal DM me poochhe jaate hain (jawab sirf private
     # message handler uthata hai). Group me /post chalane par bot har field
     # par chup ho jata tha — ab saaf-saaf DM par bhej dete hain.
@@ -4802,8 +4808,15 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Admin ko sirf wahi types dikhte hain jo uske liye allowed hain
     # (Upload = anime/movie). Owner ko sab.
     types = _post_types_for(uid, _scope)
-    kb = InlineKeyboardMarkup(
-        [[_btn(t, callback_data=f"posttype:{t}", style="primary")] for t in types])
+    _post_scope[uid] = _scope          # posttype callback ko chahiye
+    if _scope == "admin":
+        # Anime | Movie — do block, side by side (half half)
+        kb = InlineKeyboardMarkup([[
+            _btn(t, callback_data=f"posttype:{t}", style="primary") for t in types
+        ]])
+    else:
+        kb = InlineKeyboardMarkup(
+            [[_btn(t, callback_data=f"posttype:{t}", style="primary")] for t in types])
     await update.effective_message.reply_text(
         f"{fonts.bold('What are you posting?')}", reply_markup=kb)
 
@@ -4850,6 +4863,28 @@ async def _post_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not fl:
         return
     txt = (update.effective_message.text or "").strip()
+
+    # --- LINK FLOW (admin): sirf link -> bot ka start link. Koi post nahi. ---
+    if fl.get("mode") == "link":
+        link = _as_url(txt)
+        if not link:
+            await update.effective_message.reply_text(
+                f"{fonts.bold('Link sahi nahi lag raha')}\n"
+                f"{fonts.small_caps('https:// se shuru karo')} — dobara bhejo.")
+            return
+        code = _new_code()
+        db_post_save(code, {
+            "code": code, "type": fl["type"], "Name": fl["type"],
+            "Link": link, "channel_ids": [], "posted": False,
+            "created": _now(),
+        })
+        _post_flow.pop(uid, None)
+        await update.effective_message.reply_text(
+            f"{fonts.bold('LINK READY')}\n\n"
+            f"{_deep_link(context, code)}\n\n"
+            f"{fonts.small_caps('jisko dena ho use ye bhej do')} — "
+            f"{fonts.small_caps('gate ke baad asli link milega')}")
+        return
 
     # --- banner image ka intezaar ---
     if fl.get("await_image"):
