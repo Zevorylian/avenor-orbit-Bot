@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-18"
+BOT_BUILD = "2026-11-25 · mahiru-persona-19"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -245,6 +245,8 @@ from storage import (
     db_chat_flag,
     db_chat_flag_set,
     db_admins,
+    db_owner_get,
+    db_owner_set,
     db_admin_add,
     db_admin_del,
     db_post_id_set,
@@ -906,8 +908,17 @@ def admin_name(uid) -> str:
     return nm or admin_label(uid)
 
 
+def owner_id() -> int:
+    """Owner = env OWNER_ID, warna DB wala (ek baar /claim se set)."""
+    try:
+        return int(OWNER_ID) or db_owner_get()
+    except (TypeError, ValueError):
+        return db_owner_get()
+
+
 def is_owner(uid: int) -> bool:
-    return OWNER_ID != 0 and int(uid) == OWNER_ID
+    oid = owner_id()
+    return oid != 0 and int(uid) == oid
 
 
 def is_privileged(uid: int) -> bool:
@@ -1694,6 +1705,7 @@ _COMMANDS = [
     ("members",   "real member list (needs MTProto setup)", "owner"),
     ("autopost",  "daily auto message in this chat",      "owner"),
     ("admin",     "add or remove admins",                "owner"),
+    ("claim",     "first-run owner setup",               "hidden"),
     ("gate",      "force-join channels (strict)",        "owner"),
     ("export",    "backup every post link",              "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
@@ -1755,6 +1767,30 @@ def _owner_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """EK HI BAAR: agar koi owner set nahi hai to tum owner ban jao.
+
+    Bootstrap ke liye — OWNER_ID Render me daalna zaroori nahi. Ek baar
+    owner ban jane ke baad ye command dead ho jati hai (dusra koi claim
+    nahi kar sakta).
+    """
+    uid = update.effective_user.id
+    cur = owner_id()
+    if cur:
+        if cur == uid:
+            await update.effective_message.reply_text(
+                "Tum pehle se owner ho. /owner se panel kholo.")
+        else:
+            await update.effective_message.reply_text(
+                "Owner pehle se set hai — claim band.")
+        return
+    db_owner_set(uid)
+    log.warning("OWNER CLAIMED: %s (%s)", uid, update.effective_user.full_name)
+    await update.effective_message.reply_text(
+        f"✅ owner set: {uid}\n\n"
+        f"ab /owner se poora panel khulega, aur /admin se admins bana sakte ho.")
+
+
 async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """OWNER PANEL — saari owner powers ek jagah.
 
@@ -1780,12 +1816,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sc, bd = fonts.small_caps, fonts.bold
     sep = "━━━━━━━━━━━━━━━━━"
     lvl = 2 if is_owner(uid) else (1 if is_admin(uid) else 0)
-    rank = {"member": 0, "admin": 1, "owner": 2}
+    rank = {"member": 0, "admin": 1, "owner": 2, "hidden": 99}
     out = [bd("COMMANDS"), "",
            f"{sc('tap a command, or just write to me')}", ""]
     last_rank = None
     for c, d, r in _COMMANDS:
-        if rank[r] > lvl:
+        if r == "hidden" or rank[r] > lvl:
             continue
         # Ek se zyada group dikh rahe hain to unke beech ek khaali line —
         # padhne me aasan. Member ko sirf ek group dikhta hai, to flat.
@@ -3943,8 +3979,21 @@ async def _need_owner(update):
     """Sirf owner. Baaki sab ke liye CHUP — koi message nahi.
     Wajah: agar admin ko "Only the owner can do this." dikhe to usko pata chal
     jata hai ki upar koi tier hai — aur admin ko ye pata nahi chalna chahiye.
-    Commands menu bhi role ke hisaab se hi set hota hai (_set_commands)."""
-    return is_owner(update.effective_user.id)
+    Commands menu bhi role ke hisaab se hi set hota hai (_set_commands).
+
+    EK EXCEPTION: agar duniya me koi owner set hi nahi hai (na env, na DB),
+    to chup rehna galat hai — owner ko lagega bot kharab hai. Us haalat me
+    ek line ka hint jata hai. Owner set hote hi ye hint band.
+    """
+    uid = update.effective_user.id
+    if is_owner(uid):
+        return True
+    if owner_id() == 0:
+        await _safe(
+            update.effective_message.reply_text,
+            "Owner set nahi hai. Ek hi baar /claim bhejo (tum owner ban jaoge) "
+            "— ya Render me OWNER_ID=<tumhara id> daalo.")
+    return False
 
 
 def _owner_core_ids() -> set:
@@ -4215,6 +4264,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             src = "env" if a in ADMIN_IDS else "db"
             out.append(f"🛡 {bd(admin_name(a))}")
             out.append(f"   {sc('id')} {a}   ({src})")
+            out.append(f"   {sc('has')} : post, posts, pin, del, kick, unkick")
         out += ["", f"{sc('add')}: /admin add <id> <naam>",
                 f"{sc('remove')}: /admin remove <id>"]
         await _send_long(msg, "\n".join(out))
@@ -4266,11 +4316,16 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         out.append(f"   {sc('id')} : {OWNER_ID}")
         out.append("")
     shown = 0
-    for a in ADMIN_IDS:
-        if not is_owner(viewer) and a == OWNER_ID:
+    _seen = set()
+    _all = list(ADMIN_IDS) + [int(k) for k in db_admins()]
+    for a in _all:
+        if a in _seen:
+            continue
+        _seen.add(a)
+        if not is_owner(viewer) and a == owner_id():
             continue          # admin ko owner ki id nahi dikhani
         out.append(f"🛡 {bd(admin_name(a))}")
-        out.append(f"   {sc('id')} : {a}")
+        out.append(f"   {sc('id')} : {a}   ({sc('env') if a in ADMIN_IDS else sc('db')})")
         shown += 1
     if not shown:
         out.append("No admins configured — set ADMIN_IDS on Render.")
@@ -4545,7 +4600,13 @@ def _channel_rows(sel, channels=None) -> list:
             mark = DONE_MARK + " " if c in sel else ""
             r.append(_btn(f"{mark}{name}", callback_data=f"postch:{c}",
                           style="success" if c in sel else "primary"))
-        rows.append(r)
+            # 2 se zyada button ek row me -> naam kat jate hain (5 channel
+            # ek row me "ANIM…" ban gaye the). Isliye har 2 par row todo.
+            if len(r) == 2:
+                rows.append(r)
+                r = []
+        if r:
+            rows.append(r)
     rows.append([_btn("Done", callback_data="postch_done", style="success")])
     return rows
 
@@ -5439,6 +5500,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("members", cmd_members))
     app.add_handler(CommandHandler("autopost", cmd_autopost))
     app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("claim", cmd_claim))
     app.add_handler(CommandHandler("gate", cmd_gate))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("rules", cmd_rules))

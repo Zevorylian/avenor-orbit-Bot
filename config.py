@@ -284,7 +284,11 @@ ADMIN_IDS = [
 
 # #3b  OWNER  (bot ka malik). Khaali chhodo to ADMIN_IDS ka pehla id owner maana jayega.
 #      Owner ko force-join gate NAHI dikhta — bina kisi permission ke chalta hai.
-OWNER_ID = _int_env("OWNER_ID", 0) or (ADMIN_IDS[0] if ADMIN_IDS else 0)
+# ZAROORI: pehle yahan `or ADMIN_IDS[0]` tha — matlab ADMIN_IDS set karte hi
+# PEHLA ADMIN apne aap OWNER ban jata tha. Isi wajah se owner ko owner nahi
+# maana ja raha tha (/admin chup, /post me sirf Upload). Ab OWNER_ID sirf
+# env se, ya ek baar /claim se (DB me save hota hai).
+OWNER_ID = _int_env("OWNER_ID", 0)
 OWNER_NAME = os.getenv("OWNER_NAME", "")
 
 # #3c  ADMIN ke naam (sirf dikhane ke liye) — ADMIN_IDS ke SAME order me.

@@ -237,7 +237,7 @@ def db_default() -> dict:
             "stats": {"total_started": 0}, "chat_ids": {}, "chats": {},
             "requests": {}, "done": {}, "posts": {}, "links": {},
             "audit": [], "ai_usage": {}, "growth": {}, "audience": {},
-            "autopost": {}, "admins": {}, "post_ids": {},
+            "autopost": {}, "admins": {}, "post_ids": {}, "owner": 0,
             "gate": {"on": False, "blocks": []}, "gate_links": {}}
 
 
@@ -1110,6 +1110,22 @@ def db_post_id_set(key, chat_id) -> None:
 def db_post_ids() -> dict:
     with _db_lock:
         return dict(db_load().get("post_ids", {}))
+
+
+def db_owner_get() -> int:
+    """DB me save kiya gaya owner (ek baar /claim se set hota hai)."""
+    with _db_lock:
+        try:
+            return int(db_load().get("owner") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+
+def db_owner_set(uid) -> None:
+    with _db_lock:
+        d = db_load()
+        d["owner"] = int(uid)
+        db_save(d)
 
 
 def db_admins() -> dict:
