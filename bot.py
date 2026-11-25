@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-24"
+BOT_BUILD = "2026-11-25 · mahiru-persona-25"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1454,14 +1454,16 @@ async def _set_commands(app: Application):
 
     # MEMBER ko sirf 6 commands dikhte hain — baaki sab menu se gayab.
     # (Handlers waise hi kaam karte hain, par menu saaf rehta hai.)
+    # MENU MINIMAL rakho (owner ne kaha: "menu me bahut saare commands
+    # clutter lag rahe hain"). Baaki sab /owner panel ke buttons me hai —
+    # commands type karne par ab bhi chalti hain, bas menu me nahi dikhti.
+    #
+    #   member : user ke 6
+    #   admin  : wahi 6 + /admin
+    #   owner  : wahi 6 + /admin + /owner   (total 8)
     member = [_bc(c) for c in _MEMBER_MENU]
-    # ADMIN ko member ke + group ke tools + /admin panel.
-    admin = member + [_bc(c) for c in _ADMIN_MENU] + [_bc("admin")]
-    # OWNER ko SAB kuch — aur /admin, /owner ke thik UPAR.
-    owner = member + [_bc(c) for c in _ADMIN_MENU]
-    owner += [_bc(c) for c, d, r in _COMMANDS
-              if r == "owner" and c not in ("owner", "admin")]
-    owner += [_bc("admin"), _bc("owner")]
+    admin = member + [_bc("admin")]
+    owner = member + [_bc("admin"), _bc("owner")]
     try:
         await app.bot.set_my_commands(member, scope=BotCommandScopeDefault())
         log.info("Commands menu set (%s default commands).", len(member))
@@ -4293,9 +4295,11 @@ async def _refresh_menu(context, uid) -> None:
         c = POST_COMMAND if name == "POSTCMD" else name
         return BotCommand(c, desc.get(name, name))
 
+    # Wahi minimal scheme jo _set_commands me hai (warna naye admin ko
+    # 12 commands ka purana menu chala jata).
     member = [_bc(c) for c in _MEMBER_MENU]
-    admin = member + [_bc(c) for c in _ADMIN_MENU]
-    owner = member + [_bc("owner")]
+    admin = member + [_bc("admin")]
+    owner = member + [_bc("admin"), _bc("owner")]
     try:
         if is_owner(uid):
             cmds = owner
