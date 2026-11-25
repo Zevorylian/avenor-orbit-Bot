@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-19"
+BOT_BUILD = "2026-11-25 · mahiru-persona-20"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -247,6 +247,8 @@ from storage import (
     db_admins,
     db_owner_get,
     db_owner_set,
+    db_owner_name,
+    db_owner_name_set,
     db_admin_add,
     db_admin_del,
     db_post_id_set,
@@ -1685,14 +1687,14 @@ _COMMANDS = [
     ("report",   "report a message to the admins",     "member"),
     ("ref",      "your invite link and count",         "member"),
     ("privacy",  "what data is stored, and how to erase it", "member"),
-    ("admins",     "list the team",                    "admin"),
-    ("settitle",   "rename this group",                "admin"),
-    ("invitelink", "create an invite link",            "admin"),
+    ("admins",     "list the team",                    "owner"),
+    ("settitle",   "rename this group",                "owner"),
+    ("invitelink", "create an invite link",            "owner"),
     ("kick",       "remove someone",                   "admin"),
     ("unkick",     "undo a kick or ban",               "admin"),
     ("del",        "delete a message (reply)",         "admin"),
     ("pin",        "pin a message (reply)",            "admin"),
-    ("promote",    "make someone an admin",            "admin"),
+    ("promote",    "make someone an admin",            "owner"),
     ("POSTCMD",    "build a channel post",             "admin"),
     ("posts",      "list your posts",                  "admin"),
     ("links",      "saved links, duplicates merged",   "owner"),
@@ -1785,6 +1787,10 @@ async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Owner pehle se set hai — claim band.")
         return
     db_owner_set(uid)
+    try:
+        db_owner_name_set(update.effective_user.first_name or "")
+    except Exception:
+        pass
     log.warning("OWNER CLAIMED: %s (%s)", uid, update.effective_user.full_name)
     await update.effective_message.reply_text(
         f"✅ owner set: {uid}\n\n"
@@ -4311,9 +4317,9 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     viewer = update.effective_user.id
     sc, bd = fonts.small_caps, fonts.bold
     out = [bd("TEAM"), ""]
-    if is_owner(viewer) and OWNER_ID:
-        out.append(f"👑 {bd('Owner')} : {OWNER_NAME or 'Owner'}")
-        out.append(f"   {sc('id')} : {OWNER_ID}")
+    if is_owner(viewer) and owner_id():
+        out.append(f"👑 {bd('Owner')} : {OWNER_NAME or db_owner_name() or 'Owner'}")
+        out.append(f"   {sc('id')} : {owner_id()}")
         out.append("")
     shown = 0
     _seen = set()

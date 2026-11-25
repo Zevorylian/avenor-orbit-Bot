@@ -237,7 +237,7 @@ def db_default() -> dict:
             "stats": {"total_started": 0}, "chat_ids": {}, "chats": {},
             "requests": {}, "done": {}, "posts": {}, "links": {},
             "audit": [], "ai_usage": {}, "growth": {}, "audience": {},
-            "autopost": {}, "admins": {}, "post_ids": {}, "owner": 0,
+            "autopost": {}, "admins": {}, "post_ids": {}, "owner": 0, "owner_name": "",
             "gate": {"on": False, "blocks": []}, "gate_links": {}}
 
 
@@ -1126,6 +1126,18 @@ def db_owner_set(uid) -> None:
         d = db_load()
         d["owner"] = int(uid)
         db_save(d)
+
+
+def db_owner_name_set(name) -> None:
+    with _db_lock:
+        d = db_load()
+        d["owner_name"] = str(name or "")[:40]
+        db_save(d)
+
+
+def db_owner_name() -> str:
+    with _db_lock:
+        return str(db_load().get("owner_name") or "")
 
 
 def db_admins() -> dict:
