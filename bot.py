@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-22"
+BOT_BUILD = "2026-11-25 · mahiru-persona-23"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1683,7 +1683,6 @@ _COMMANDS = [
     ("start",    "open the bot, see our channels",     "member"),
     ("help",     "show this list",                     "member"),
     ("id",       "your Telegram user ID",              "member"),
-    ("me",       "what you can do here",              "member"),
     ("ai",       "ask the assistant a question",       "member"),
     ("rules",    "read the community rules",           "member"),
     ("report",   "report a message to the admins",     "member"),
@@ -1708,7 +1707,7 @@ _COMMANDS = [
     ("sync",      "re-check every chat the bot knows",    "owner"),
     ("members",   "real member list (needs MTProto setup)", "owner"),
     ("autopost",  "daily auto message in this chat",      "owner"),
-    ("admin",     "add or remove admins",                "owner"),
+    ("admin",     "admin panel — post and tools",        "admin"),
     ("claim",     "first-run owner setup",               "hidden"),
     ("gate",      "force-join channels (strict)",        "owner"),
     ("export",    "backup every post link",              "owner"),
@@ -1725,7 +1724,7 @@ _COMMANDS = [
 
 
 # Menu me kaun-kaun dikhega (handlers sabhi kaam karte rahenge).
-_MEMBER_MENU = ["start", "help", "me", "ai", "rules", "report", "privacy"]
+_MEMBER_MENU = ["start", "help", "ai", "rules", "report", "privacy"]
 # ADMIN ko sirf ye — posting + halki moderation. Owner wali koi cheez nahi.
 _ADMIN_MENU = ["POSTCMD", "posts", "del", "pin", "kick", "unkick"]
 
@@ -1852,42 +1851,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lvl == 2:
         out.append(f"{sc('★ = owner only')}")
     await _send_long(update.effective_message, "\n".join(out).strip())
-
-
-async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Tumhara access: level, id, aur tumhare paas kaunsi commands hain.
-
-    Ye jaan-boojh kar member-level hai — admin ko sirf apni list dikhti hai,
-    owner tier ka koi zikr nahi. Isse "kuch kaam nahi kar raha" ka jawab
-    turant mil jata hai (silence ki jagah).
-    """
-    uid = update.effective_user.id
-    sc, bd = fonts.small_caps, fonts.bold
-    desc = {c: d for c, d, _r in _COMMANDS}
-    if is_owner(uid):
-        level, cmds = "owner", [c for c, d, r in _COMMANDS
-                                if r in ("member", "admin", "owner")]
-    elif is_admin(uid):
-        level, cmds = "admin", list(_MEMBER_MENU) + list(_ADMIN_MENU)
-    else:
-        level, cmds = "member", list(_MEMBER_MENU)
-    out = [bd("YOU"), "",
-           f"{sc('id')}    : {uid}",
-           f"{sc('level')} : {bd(level)}", ""]
-    out.append(f"{sc('commands tumhare paas')}:")
-    for c in cmds:
-        name = POST_COMMAND if c == "POSTCMD" else c
-        out.append(f"  /{name} — {desc.get(c, '')}")
-    if is_admin(uid) and not is_owner(uid):
-        ch = _channels_for(uid)
-        out += ["", f"{sc('post kahan ja sakta hai')}:"]
-        if ch:
-            for row in ch:
-                for nm, _cid in row:
-                    out.append(f"  • {nm}")
-        else:
-            out.append(f"  {sc('koi channel set nahi — owner se bolo')}")
-    await _send_long(update.effective_message, "\n".join(out))
 
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2876,6 +2839,27 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("PRIVACY: user %s ne apna data delete kiya (%s)", user.id, res)
         return
 
+    if data == "ownerpanel":
+        if not is_owner(user.id):
+            await q.answer()
+            return
+        await q.answer()
+        await cmd_owner(update, context)
+        return
+
+    if data.startswith("admpanel:"):
+        if not is_privileged(user.id):
+            await q.answer()
+            return
+        act = data.split(":", 1)[1]
+        await q.answer()
+        if act == "post":
+            _post_scope[user.id] = "admin"     # anime channels wala flow
+            await cmd_post(update, context)
+        elif act == "posts":
+            await cmd_posts(update, context)
+        return
+
     if data.startswith("owner:"):
         # BYPASS-PROOF: permission YAHAN check hoti hai, button render par nahi.
         # Non-owner ko na action milta hai, na hint.
@@ -2905,16 +2889,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return
         t = data.split(":", 1)[1]
+        _sc = _post_scope.pop(user.id, None)
         # Button render par nahi — CHALANE ke waqt check (bypass-proof).
-        if t not in _post_types_for(user.id):
+        if t not in _post_types_for(user.id, _sc):
             await q.answer("Ye type tumhare liye nahi hai", show_alert=False)
             log.warning("Post type blocked: %s tried %r", user.id, t)
             return
-        if not _channels_for(user.id):
+        if not _channels_for(user.id, _sc):
             await q.answer("Koi channel set nahi hai", show_alert=True)
             return
         _post_flow[user.id] = {"type": t, "step": 0, "data": {}, "channels": [],
-                               "_t": time.time()}
+                               "scope": _sc, "_t": time.time()}
         await q.answer()
         try:
             await q.edit_message_text(f"{t} — let us begin.")
@@ -4308,6 +4293,45 @@ async def _refresh_menu(context, uid) -> None:
         log.warning("Command menu refresh fail (%s): %s", uid, e)
 
 
+# /admin panel se shuru hua post -> ADMIN_CHANNELS (anime) me jayega.
+_post_scope: dict = {}
+
+
+def _admin_panel_kb(uid) -> InlineKeyboardMarkup:
+    rows = [[_btn("📝 Post", callback_data="admpanel:post", style="primary"),
+             _btn("📄 Posts", callback_data="admpanel:posts", style="primary")]]
+    if is_owner(uid):
+        rows.append([_btn("👑 Owner panel", callback_data="ownerpanel",
+                          style="success")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ADMIN PANEL — admin aur owner dono ke liye.
+
+    /admin            -> panel (Post / Posts, owner ko Owner panel bhi)
+    /admin add ...    -> admin add (sirf owner)
+    /admin remove ... -> admin remove (sirf owner)
+    /admin list       -> admins ki list (sirf owner)
+
+    Panel se Post dabane par channels ADMIN_CHANNELS (anime) wale aate hain.
+    """
+    uid = update.effective_user.id
+    if not is_privileged(uid):
+        return
+    if context.args:
+        return await cmd_admin(update, context)
+    sc, bd = fonts.small_caps, fonts.bold
+    ch = _channels_for(uid, scope="admin")
+    names = [n for row in ch for n, _c in row] or [sc("koi channel set nahi")]
+    text = (f"{bd('ADMIN PANEL')}\n\n"
+            f"{sc('post kahan ja sakta hai')}:\n"
+            + "\n".join(f"  • {n}" for n in names)
+            + f"\n\n{sc('group me')}: /del  /pin  /kick  /unkick  "
+              f"({sc('message par reply karke')})")
+    await update.effective_message.reply_text(text, reply_markup=_admin_panel_kb(uid))
+
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """OWNER: admins banao/hatao — bina redeploy.
 
@@ -4694,20 +4718,30 @@ def _channel_rows(sel, channels=None) -> list:
     return rows
 
 
-def _post_types_for(uid) -> list:
-    """Owner -> saare post types. Admin -> sirf Upload (anime/movie)."""
+def _post_types_for(uid, scope=None) -> list:
+    """Owner -> saare post types. Admin -> sirf Upload (anime/movie).
+
+    scope="admin" (/admin panel se aaya) -> sirf Upload, owner ke liye bhi,
+    kyunki wo "admin ka kaam" hai.
+    """
+    if scope == "admin":
+        return ["Upload"] if "Upload" in POST_TYPES else list(POST_TYPES[:1])
     if is_owner(uid):
         return list(POST_TYPES)
     allowed = [t for t in POST_TYPES if t == "Upload"]
     return allowed or ["Upload"]
 
 
-def _channels_for(uid) -> list:
-    """Owner -> POST_CHANNELS. Admin -> SIRF ADMIN_CHANNELS.
+def _channels_for(uid, scope=None) -> list:
+    """Kaunse channels post ke liye.
 
-    Khali ho to admin ko kuch nahi — jaan-boojh kar fail-closed, warna admin
-    galti se owner ke channel me post kar deta hai.
+    scope="admin"  -> ADMIN_CHANNELS (anime wale), owner ke liye bhi.
+    warna          -> owner: POST_CHANNELS, admin: ADMIN_CHANNELS.
+    Khali ho to kuch nahi — fail-closed, warna admin owner ke channel me
+    post kar deta hai.
     """
+    if scope == "admin":
+        return [list(ADMIN_CHANNELS)] if ADMIN_CHANNELS else []
     if is_owner(uid):
         return POST_CHANNELS
     if ADMIN_CHANNELS:
@@ -4720,7 +4754,7 @@ async def _post_channel_kb(chat_id, context, uid, edit_msg=None):
     if not fl:
         return
     # Admin ko sirf ADMIN_CHANNELS dikhte hain (owner ke channels nahi).
-    _ch = _channels_for(uid)
+    _ch = _channels_for(uid, fl.get("scope"))
     if not _ch:
         await _safe(context.bot.send_message, chat_id,
                     "Admin ke liye koi channel set nahi hai. Owner se bolo: "
@@ -4743,7 +4777,8 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_privileged(update.effective_user.id):
         return
     uid = update.effective_user.id
-    _ch = _channels_for(uid)
+    _scope = _post_scope.get(uid)
+    _ch = _channels_for(uid, _scope)
     if not _ch:
         # Admin ke liye alag message — owner ko pata chale ki kya karna hai.
         if is_owner(uid):
@@ -4766,7 +4801,7 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _post_flow.pop(update.effective_user.id, None)
     # Admin ko sirf wahi types dikhte hain jo uske liye allowed hain
     # (Upload = anime/movie). Owner ko sab.
-    types = _post_types_for(uid)
+    types = _post_types_for(uid, _scope)
     kb = InlineKeyboardMarkup(
         [[_btn(t, callback_data=f"posttype:{t}", style="primary")] for t in types])
     await update.effective_message.reply_text(
@@ -5568,7 +5603,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("owner", cmd_owner))
     app.add_handler(CommandHandler("id", cmd_id))
-    app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("ref", cmd_ref))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
@@ -5583,7 +5617,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("members", cmd_members))
     app.add_handler(CommandHandler("autopost", cmd_autopost))
-    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("admin", cmd_admin_panel))
     app.add_handler(CommandHandler("claim", cmd_claim))
     app.add_handler(CommandHandler("gate", cmd_gate))
     app.add_handler(CommandHandler("export", cmd_export))
