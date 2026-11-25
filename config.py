@@ -233,7 +233,9 @@ STORAGE_MAX_BACKOFF = _int_env("STORAGE_MAX_BACKOFF", 60)
 STORAGE_DOC_LIMIT_BYTES = _int_env("STORAGE_DOC_LIMIT_BYTES", 16 * 1024 * 1024)
 STORAGE_ALERT_BYTES = _int_env("STORAGE_ALERT_BYTES", 12 * 1024 * 1024)
 # Kitne posts / links rakhe jayen (purane gira diye jaate hain — doc bound)
-POSTS_KEEP = _int_env("POSTS_KEEP", 200)
+# Admin ke banaye post (aur unke links) kitne yaad rahen. Ye asli data hai —
+# isliye default bada rakha hai; 16 MB limit par bhi kam se kam 500 rehte hain.
+POSTS_KEEP = _int_env("POSTS_KEEP", 2000)
 LINKS_KEEP = _int_env("LINKS_KEEP", 1000)
 # Admin action journal (audit log) kitni entries yaad rahen
 AUDIT_KEEP = _int_env("AUDIT_KEEP", 300)
@@ -860,8 +862,10 @@ DEFAULT_PRIVACY_TEXT = (
     "caches (join-request records, verification marks, admin action log) are "
     "removed after {cache_days} days.\n\n"
     "Your control\n"
-    "Send /delete_my_data at any time to erase your record, your referral "
-    "count, and your conversation memory. It takes effect immediately.\n\n"
+    "You can have your record, your referral count and your conversation "
+    "memory erased. The exact way to do it is in the privacy policy (the link "
+    "below / on the bot's profile), so it stays in one place and cannot go "
+    "out of date here.\n\n"
     "Contact\n"
     "Questions or a deletion request for group data: message the bot owner "
     "or the community at {community}.\n"
@@ -875,7 +879,8 @@ DEFAULT_PRIVACY_TEXT = (
 POST_COMMAND = os.getenv("POST_COMMAND", "post").lstrip("/")
 
 # Post ke type buttons (jo /post par dikhte hain)
-POST_TYPES = [x.strip() for x in os.getenv("POST_TYPES", "APK,Update,AI Tool,News,Tip").split(",") if x.strip()]
+POST_TYPES = [x.strip() for x in os.getenv(
+    "POST_TYPES", "Upload,APK,Update,AI Tool,News,Tip").split(",") if x.strip()]
 
 # AI kin cheezon ka sawaal poochhega (channel uske BAAD poochha jata hai).
 # Ye DEFAULT hai — us type ke liye jo niche POST_FIELDS_BY_TYPE me na ho.
@@ -886,6 +891,9 @@ POST_FIELDS = [x.strip() for x in
 # isliye uske liye Year poochha jaata hai. Caption ki lines khud in fields se
 # banti hain (Name aur Link chhod ke).
 POST_FIELDS_BY_TYPE = {
+    # "Upload" = anime / movie / episode wala flow: naam -> link -> bot ka
+    # deep link -> strict gate -> asli link.
+    "Upload":   ["Name", "Link"],
     # Har category ke apne fields. "Name" aur "Link" caption me alag jagah
     # jaate hain, baaki sab detail lines banti hain.
     "APK":     ["Name", "Version", "Size", "Android", "Link"],
@@ -905,6 +913,7 @@ POST_FIELDS_BY_TYPE = {
 # Button ka label — chhota, action wala, aur badge se ALAG (warna dono ek hi
 # baat kehte hain: "UPDATE LIVE" + "Update").
 POST_BUTTON_BY_TYPE = {
+    "Upload":   "Get it",
     "APK":     "Download",
     "Update":  "Get it",
     "AI Tool": "Try it",
@@ -914,6 +923,7 @@ POST_BUTTON_BY_TYPE = {
 
 # Caption me end wali badge line. Chhoti aur professional.
 POST_BADGE_BY_TYPE = {
+    "Upload":   "NEW UPLOAD",
     "APK":     "NEW RELEASE",
     "Update":  "UPDATE LIVE",
     "AI Tool": "NEW TOOL",
@@ -931,6 +941,41 @@ JOIN_BUTTON_TEXT = os.getenv("JOIN_BUTTON_TEXT", "Request to Join")
 # /post me channel chunne ke buttons — (naam, chat id) ki rows.
 #   id POSITIVE do (jaise 1001111111111) — bot khud -1001111111111 bana lega.
 #   Ek hi row ke buttons saath aate hain. Chaho to badal lo.
+# ---- STRICT GATE CHANNELS (code me, permanent) ------------------------
+# Post ka deep link kholte hi user ko YAHI channels dikhte hain, aur
+# "Joined / Verify" dabane par har channel ki membership check hoti hai.
+# Saare join hone par hi asli link milta hai. (Ek bhi baaki = nahi milega.)
+#
+# "id" numeric ho to best (bot us channel me ADMIN hona chahiye).
+# @username bhi chalega.
+#
+# NOTE: "ANIME WORLD (2072549849997)" ko yahan NAHI daala — us id ka format
+# sahi nahi lagta (supergroup id -100… se shuru hoti hai). Owner se confirm
+# hone ke baad /gate add se jod dena.
+GATE_CHANNELS = [
+    {"name": "Avenor Apps AI", "id": "@AvenorAppsAI",
+     "url": "https://t.me/AvenorAppsAI"},
+    {"name": "ANIME WORLD", "id": -1002549849997,
+     "url": "https://t.me/c/2549849997"},
+    {"name": "ANIME NEWS", "id": -1003910002446,
+     "url": "https://t.me/c/3910002446"},
+    {"name": "ANIME UNIVERSE", "id": -1002493856027,
+     "url": "https://t.me/c/2493856027"},
+    {"name": "Hoyoverse Animes", "id": -1003894555958,
+     "url": "https://t.me/c/3894555958"},
+    {"name": "Sarrows Banners", "id": -1004498955231,
+     "url": "https://t.me/c/4498955231"},
+]
+
+# ADMIN ke apne channels (jahan wo post kar sakte hain). Khali = admins
+# POST_CHANNELS hi dekhte hain. Format: "Naam=@username,Naam2=@username2"
+ADMIN_CHANNELS = []
+for _item in (os.getenv("ADMIN_CHANNELS", "") or "").split(","):
+    if "=" in _item:
+        _n, _u = _item.split("=", 1)
+        if _n.strip() and _u.strip():
+            ADMIN_CHANNELS.append((_n.strip()[:40], _u.strip()))
+
 POST_CHANNELS = [
     # Post kahan jayega. @username bhi chalega (numeric id ki tarah) — bot
     # us channel/group me ADMIN hona chahiye, warna post fail hoga.

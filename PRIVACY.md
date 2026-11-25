@@ -58,6 +58,19 @@ Nothing else leaves the bot. Messages are not forwarded to any other third party
 
 ## Your control
 
+Send `/delete_my_data` to the bot in a private chat to erase:
+
+- your account record (id, name, username, dates)
+- your invite count, and your id from other people's invite lists
+- the bot's memory of your conversations
+
+The bot asks for a confirmation first, then commits the change to storage and verifies the record is
+gone before telling you it worked. You can keep using the bot afterwards; a new record starts only if
+you send `/start` again.
+
+> This command is deliberately not listed in the bot's `/help` or its command menu — it is documented
+> here instead, so the bot does not advertise a destructive action.
+
 Send **`/delete_my_data`** to the bot in a private chat. It deletes, in one step:
 
 - your account record (ID, name, username, timestamps);

@@ -109,6 +109,8 @@ from config import (
     AI_PROMPT_FROM_ENV,
     POST_COMMAND,
     POST_CHANNELS,
+    ADMIN_CHANNELS,
+    GATE_CHANNELS,
     POST_ASK_IMAGE,
     POST_CREDIT_TEXT,
     POST_CREDIT_URL,
@@ -204,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-13"
+BOT_BUILD = "2026-11-25 · mahiru-persona-16"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -242,6 +244,17 @@ from storage import (
     db_autopost_all,
     db_chat_flag,
     db_chat_flag_set,
+    db_admins,
+    db_admin_add,
+    db_admin_del,
+    db_post_id_set,
+    db_post_ids,
+    db_gate,
+    db_gate_on,
+    db_gate_link_set,
+    db_gate_links,
+    db_gate_add,
+    db_gate_del,
     db_user_exists,
     db_all_users,
     db_is_banned,
@@ -875,7 +888,22 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
 #  HELPERS
 # =====================================================================
 def is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
+    """Admin = env ADMIN_IDS + jo owner ne /admin se add kiye."""
+    try:
+        if int(uid) in ADMIN_IDS:
+            return True
+        return str(int(uid)) in db_admins()
+    except (TypeError, ValueError):
+        return False
+
+
+def admin_name(uid) -> str:
+    """Admin ka naam — DB wala pehle, warna ADMIN_NAMES, warna 'Admin N'."""
+    try:
+        nm = db_admins().get(str(int(uid))) or ""
+    except (TypeError, ValueError):
+        nm = ""
+    return nm or admin_label(uid)
 
 
 def is_owner(uid: int) -> bool:
@@ -963,13 +991,52 @@ def _is_tap_block(b) -> bool:
     return (b.get("verify") or "member") == "tap"
 
 
+def _gate_blocks() -> list:
+    """Force-join ke liye zaroori blocks.
+
+    Do jagah se aate hain:
+      1) config LINK_BLOCKS jinme require_join=True
+      2) /gate se runtime add kiye gaye (DB me) — inke liye redeploy nahi
+         chahiye. Isse owner 5 channel bana kar turant strict gate laga sakta hai.
+    """
+    out, seen = [], set()
+
+    def _add(b):
+        # Ek hi channel do baar na aaye (naam duplicate ho sakta hai — id key hai)
+        k = _cid_key(b.get("id") or b.get("name"))
+        if k in seen:
+            return
+        seen.add(k)
+        out.append(b)
+
+    links = db_gate_links()
+    # 1) config me permanent gate channels (owner ne ids di hain) — 2 per row
+    for i, b in enumerate(GATE_CHANNELS):
+        if not (b.get("id") or b.get("url")):
+            continue
+        cid = b.get("id")
+        url = links.get(str(cid)) or b.get("url")
+        _add({**b, "url": url, "require_join": True, "row": 100 + i // 2})
+    # 2) /gate se runtime add kiye gaye
+    g = db_gate()
+    if g.get("on"):
+        for b in g.get("blocks") or []:
+            if b.get("url"):
+                _add({**b, "require_join": True, "row": 99})
+    # 3) config LINK_BLOCKS jinme require_join=True
+    for b in LINK_BLOCKS:
+        if b.get("require_join"):
+            _add(b)
+    return out
+
+
 def enforced_blocks():
     """Jo blocks force-join ke liye zaroori hain.
     "tap" wale blocks ki chat id nahi hoti — unhe bhi shamil karo, warna wo
     gate se chup-chaap bahar ho jaate."""
     learned = _learned_ids()
     out = []
-    for b in LINK_BLOCKS:
+    for b in _gate_blocks():
         if not b.get("require_join"):
             continue
         if _is_tap_block(b):
@@ -1077,7 +1144,7 @@ def required_count(total=None) -> int:
     channels ki id nahi thi wo chup-chaap maaf ho jaate the aur "all" ka
     matlab 4 ke bajaye kam ho jata tha. (Asli bug.)"""
     if total is None:
-        total = sum(1 for b in LINK_BLOCKS if b.get("require_join"))
+        total = len(_gate_blocks())
     if total <= 0:
         return 0
     val = str(MIN_JOINS_REQUIRED).strip().lower()
@@ -1091,7 +1158,7 @@ def required_count(total=None) -> int:
 
 def has_required_blocks() -> bool:
     """config me koi bhi require_join block hai?"""
-    return any(b.get("require_join") for b in LINK_BLOCKS)
+    return bool(_gate_blocks())
 
 
 async def join_status(context, user_id, force=False):
@@ -1136,7 +1203,7 @@ def gate_report():
     wahan sirf dikhawe ka hota hai. Ye function us baat ko saaf karta hai."""
     learned = _learned_ids()
     ready, no_id = [], []
-    for blk in LINK_BLOCKS:
+    for blk in _gate_blocks():
         if not blk.get("require_join"):
             continue
         if _is_tap_block(blk):
@@ -1193,6 +1260,47 @@ def _btn(label, **kw):
     return InlineKeyboardButton(label, **kw)
 
 
+def _post_only_chats() -> set:
+    """Jo chats sirf POST TARGET hain (LINK_BLOCKS me nahi).
+
+    Owner ne kaha: "in channels ko bot yaad nahi rakhna chahiye, warna unke
+    users bhi apne count me aa jayenge." Isliye in chats ke liye bot
+    learn_chat / audience / growth — kuch nahi karta.
+    """
+    block_ids = {_cid_key(b.get("id")) for b in LINK_BLOCKS if b.get("id")}
+    block_ids |= {_cid_key(v) for v in _learned_ids().values()}
+    out = set()
+    for row in POST_CHANNELS:
+        for _name, cid in row:
+            k = _cid_key(_norm_chat_id(cid))
+            if k not in block_ids:
+                out.add(k)
+    # Username wale post targets ka numeric id bhi (jo humne seekha)
+    for key, cid in db_post_ids().items():
+        if _cid_key(cid) not in block_ids:
+            out.add(_cid_key(cid))
+            out.add(str(key))
+    return out
+
+
+def _post_only_username(chat) -> bool:
+    """Kya ye chat POST_CHANNELS me username se hai (LINK_BLOCKS me nahi)?"""
+    uname = str(getattr(chat, "username", "") or "").strip().lower()
+    if not uname:
+        return False
+    block_ids = {_cid_key(b.get("id")) for b in LINK_BLOCKS if b.get("id")}
+    for row in POST_CHANNELS:
+        for _name, cid in row:
+            c = str(cid).strip().lower().lstrip("@")
+            if c == uname and _cid_key("@" + c) not in block_ids:
+                return True
+    return False
+
+
+def _is_post_only(chat_id) -> bool:
+    return _cid_key(chat_id) in _post_only_chats()
+
+
 # _cid_key ab storage.py se aata hai (ek hi jagah define hai).
 
 
@@ -1208,7 +1316,7 @@ def _block_chat_id(blk):
         return str(cid).strip()
 
 
-def link_keyboard(extra_rows=None, joined=None, tap_done=None):
+def link_keyboard(extra_rows=None, joined=None, tap_done=None, blocks=None):
     """config.py ke LINK_BLOCKS se buttons banao.
     Jinke "row" number same hai, wo ek hi row mein (side-by-side) aate hain.
     `joined` = jin chat ids ki membership verify ho chuki (joined ya request) —
@@ -1219,7 +1327,7 @@ def link_keyboard(extra_rows=None, joined=None, tap_done=None):
     rows = []
     by_row: dict = {}
     order = []
-    for b in LINK_BLOCKS:
+    for b in (blocks if blocks is not None else LINK_BLOCKS):
         r = b.get("row", len(order) + 1)
         if r not in by_row:
             by_row[r] = []
@@ -1263,11 +1371,39 @@ def _tap_done_names(user_id) -> list:
     return [b["name"] for b in LINK_BLOCKS if _is_tap_block(b) and is_done(user_id, b["name"])]
 
 
+async def _ensure_gate_links(context) -> int:
+    """Gate channels ke ASLI join link banao (invite link), ek hi baar.
+
+    Zaroori kyun: private channel ka `t.me/c/...` link sirf member ke liye
+    khulta hai — jo user join karne aaya hai wo member hi nahi hai, uske liye
+    wo dead link hai. Invite link (`t.me/+...`) hi kaam karta hai, aur wo bot
+    bana sakta hai (us channel me admin hone par).
+    """
+    links = db_gate_links()
+    made = 0
+    for b in _gate_blocks():
+        cid = b.get("id")
+        if not cid or str(cid) in links:
+            continue
+        try:
+            link = await context.bot.create_chat_invite_link(
+                cid, name=f"{BOT_BRAND[:20]} gate")
+            db_gate_link_set(cid, link.invite_link)
+            made += 1
+        except Exception as e:
+            log.warning("Gate invite link fail (%s): %s", b.get("name"), e)
+    if made:
+        log.info("Gate invite links banaye: %s", made)
+    return made
+
+
 async def send_join_gate(update, context, edit=False, joined=None):
+    await _ensure_gate_links(context)
     text = GATE_MESSAGE
     kb = link_keyboard(extra_rows=[
         [_btn(GATE_BUTTON_TEXT, callback_data="check_join", style="success")],
-    ], joined=joined, tap_done=_tap_done_names(update.effective_user.id))
+    ], joined=joined, tap_done=_tap_done_names(update.effective_user.id),
+        blocks=_gate_blocks())
     sent = None
     if edit and update.callback_query:
         sent = await _safe(update.callback_query.edit_message_text, text, reply_markup=kb)
@@ -1528,7 +1664,6 @@ _COMMANDS = [
     ("report",   "report a message to the admins",     "member"),
     ("ref",      "your invite link and count",         "member"),
     ("privacy",  "what data is stored, and how to erase it", "member"),
-    ("delete_my_data", "erase your record and memory", "member"),
     ("admins",     "list the team",                    "admin"),
     ("settitle",   "rename this group",                "admin"),
     ("invitelink", "create an invite link",            "admin"),
@@ -1548,6 +1683,9 @@ _COMMANDS = [
     ("sync",      "re-check every chat the bot knows",    "owner"),
     ("members",   "real member list (needs MTProto setup)", "owner"),
     ("autopost",  "daily auto message in this chat",      "owner"),
+    ("admin",     "add or remove admins",                "owner"),
+    ("gate",      "force-join channels (strict)",        "owner"),
+    ("export",    "backup every post link",              "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
     ("getid",     "get a chat's numeric ID",           "owner"),
     ("setid",     "bind a block to a chat ID",         "owner"),
@@ -1562,8 +1700,8 @@ _COMMANDS = [
 
 # Menu me kaun-kaun dikhega (handlers sabhi kaam karte rahenge).
 _MEMBER_MENU = ["start", "help", "ai", "rules", "report", "privacy"]
-_ADMIN_MENU = ["admins", "settitle", "invitelink", "kick", "unkick", "del",
-               "pin", "promote", "POSTCMD", "posts"]
+# ADMIN ko sirf ye — posting + halki moderation. Owner wali koi cheez nahi.
+_ADMIN_MENU = ["POSTCMD", "posts", "del", "pin", "kick", "unkick"]
 
 
 def _owner_actions() -> dict:
@@ -1577,6 +1715,7 @@ def _owner_actions() -> dict:
         "admins": cmd_admins, "perms": cmd_perms, "getid": cmd_getid,
         "setid": cmd_setid, "ban": cmd_ban, "unban": cmd_unban,
         "members": cmd_members, "autopost": cmd_autopost,
+        "admin": cmd_admin, "gate": cmd_gate, "export": cmd_export,
     }
 
 
@@ -1584,14 +1723,16 @@ def _owner_panel_kb() -> InlineKeyboardMarkup:
     acts = ["stats", "diag", "chats", "audience", "sync", "mongo",
             "links", "posts", "audit", "broadcast", "btnstyle", "admins",
             "perms", "getid", "setid", "ban", "unban", "members",
-            "autopost"]
+            "autopost", "admin", "gate", "export"]
     labels = {"stats": "📊 Stats", "diag": "🩺 Diag", "chats": "💬 Chats",
               "audience": "👥 Audience", "sync": "🔄 Sync", "mongo": "🗄 Mongo",
               "links": "🔗 Links", "posts": "📝 Posts", "audit": "🧾 Audit",
               "broadcast": "📣 Broadcast", "btnstyle": "🎨 Buttons",
               "admins": "🛡 Admins", "perms": "🔑 Perms", "getid": "🆔 Get ID",
               "setid": "📌 Set ID", "ban": "⛔ Ban", "unban": "✅ Unban",
-              "members": "📇 Members", "autopost": "⏰ Auto-post"}
+              "members": "📇 Members", "autopost": "⏰ Auto-post",
+              "admin": "🛡 Add Admin", "gate": "🚪 Gate",
+              "export": "📤 Export"}
     rows, row = [], []
     for a in acts:
         row.append(_btn(labels.get(a, a), callback_data=f"owner:{a}",
@@ -2247,6 +2388,36 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_long(update.effective_message, "\n".join(out))
 
 
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: saare post links ek text me — backup ke liye.
+
+    Admin jo post banata hai, uska code + deep link DB me rehta hai. Bot
+    update/redeploy hone par wo tabhi bacha rehta hai jab MongoDB connected
+    ho (Render ka local disk ephemeral hai). Isliye /export se copy kar lo.
+    """
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    allp = db_post_all()
+    if not allp:
+        await update.effective_message.reply_text(
+            f"{sc('abhi koi post nahi hai')} — /post se banao")
+        return
+    out = [bd("EXPORT"), f"{sc('posts')} : {len(allp)}",
+           f"{sc('storage')} : {mongo_status()}", ""]
+    items = sorted(allp.items(), key=lambda kv: (kv[1] or {}).get("created", ""))
+    for code, p in items:
+        out.append(f"{p.get('Name') or '-'}")
+        out.append(f"   {sc('code')} : {code}")
+        out.append(f"   {_deep_link(context, code)}")
+        ch = p.get("channel_ids") or []
+        out.append(f"   {sc('channels')} : {', '.join(str(c) for c in ch) or '-'}")
+        out.append(f"   {sc('posted')} : {p.get('posted')}")
+        out.append("")
+    out.append(f"{sc('ye text copy karke rakh lo — Mongo down hone par yahi backup hai')}")
+    await _send_long(update.effective_message, "\n".join(out))
+
+
 async def cmd_audience(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner: audience ka SACH, aur Telegram ki asli hadd.
 
@@ -2393,7 +2564,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     sc, bd = fonts.small_caps, fonts.bold
     sep = "━━━━━━━━━━━━━━━━━"
-    req_blocks = [x for x in LINK_BLOCKS if x.get("require_join")]
+    req_blocks = _gate_blocks()
     joined_count = 0
     _ready, _no_id = gate_report()
     # Koi require_join block hi nahi = gate jaan-boojh kar OFF hai -> READY.
@@ -2768,7 +2939,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = link_keyboard(
             extra_rows=[[_btn(GATE_BUTTON_TEXT, callback_data="check_join",
                               style="success")]],
-            joined=joined_ids, tap_done=_tap_done_names(user.id))
+            joined=joined_ids, tap_done=_tap_done_names(user.id),
+            blocks=_gate_blocks())
         # USI message ko edit karo jis par user ne tap kiya — isse ✓ wahin
         # dikhta hai jahan user dekh raha hai (naya message bhejne se wo purane
         # message me ✓ dhundhta rehta tha).
@@ -3361,6 +3533,12 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     status = getattr(cm.new_chat_member, "status", "")
     log.info("my_chat_member: %s (id=%s) status=%s", chat.title, chat.id, status)
+    if _is_post_only(chat.id) or _post_only_username(chat):
+        # Post-target channel: na DB me daalo, na intro, na owner ko DM.
+        if getattr(chat, "username", None):
+            db_post_id_set(chat.username, chat.id)
+        log.info("Post-only chat — memory/analytics se bahar rakha (%s)", chat.id)
+        return
     if status in (ChatMember.LEFT, ChatMember.BANNED):
         db_upsert_chat(chat.id, chat.title, str(chat.type or ""), status)
         return  # bot nikaal diya gaya
@@ -3417,6 +3595,12 @@ def learn_chat(update, status=None, force=False):
     Title match kare to block ki id bhi apne aap set kar dete hain."""
     chat = update.effective_chat
     if not chat or chat.type == ChatType.PRIVATE:
+        return
+    if _is_post_only(chat.id):
+        return          # sirf post-target channel — yaad nahi rakhte
+    if _post_only_username(chat):
+        # Pehli baar username se pahchana -> id yaad karo (par chat ko nahi)
+        db_post_id_set(chat.username, chat.id)
         return
     cid = chat.id
     now = time.time()
@@ -3745,9 +3929,47 @@ async def _need_owner(update):
     return is_owner(update.effective_user.id)
 
 
+def _owner_core_ids() -> set:
+    """Owner ke apne community/channel (LINK_BLOCKS) ki ids."""
+    out = {_cid_key(b.get("id")) for b in LINK_BLOCKS if b.get("id")}
+    out |= {_cid_key(v) for v in _learned_ids().values()}
+    return out
+
+
+def _is_owner_core(chat_id, chat=None) -> bool:
+    """Owner ka apna chat? — id, title aur username teeno se pehchante hain.
+
+    Sirf id se dekhna kaafi nahi tha: LINK_BLOCKS me ids @username ke roop me
+    hote hain, isliye title/username match zaroori hai.
+    """
+    if _cid_key(chat_id) in _owner_core_ids():
+        return True
+    if chat is None:
+        return False
+    title = getattr(chat, "title", None)
+    if not title:
+        # Purane update me title na ho to DB se dekho (bot ne pehle seekha tha)
+        title = str((db_get_chats().get(str(chat_id)) or {}).get("title") or "")
+    if title and match_block_by_title(title):
+        return True
+    uname = str(getattr(chat, "username", "") or "").strip().lower().lstrip("@")
+    if uname:
+        for b in LINK_BLOCKS:
+            if str(b.get("id") or "").strip().lower().lstrip("@") == uname:
+                return True
+    return False
+
+
 async def _need(update, group_only=True):
     """Admin check + chat type check. True = aage badho."""
     if not is_privileged(update.effective_user.id):
+        return False
+    # ADMIN ko owner ke apne community/channel me moderation nahi milta.
+    if (not is_owner(update.effective_user.id)
+            and _is_owner_core(update.effective_chat.id,
+                               update.effective_chat)):
+        log.info("Admin moderation blocked in owner chat (%s) for %s",
+                 update.effective_chat.id, update.effective_user.id)
         return False
     if group_only and not _is_group(update):
         await update.effective_message.reply_text("This command only works in a group.")
@@ -3756,8 +3978,8 @@ async def _need(update, group_only=True):
 
 
 async def cmd_settitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Group ka naam badlo — 'Change Group Info' permission chahiye."""
-    if not await _need(update):
+    """Group ka naam badlo — OWNER only (admin ko ye permission nahi di)."""
+    if not await _need_owner(update):
         return
     title = " ".join(context.args or []).strip()
     if not title:
@@ -3774,8 +3996,8 @@ async def cmd_settitle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_invitelink(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Invite link banao — 'Invite Users via Link' permission chahiye."""
-    if not is_privileged(update.effective_user.id):
+    """Invite link banao — OWNER only (admin ko ye permission nahi di)."""
+    if not await _need_owner(update):
         return
     if update.effective_chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL):
         await update.effective_message.reply_text("This command only works in a group or channel.")
@@ -3867,8 +4089,8 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Naya admin banao (group me) — 'Add New Admins' permission chahiye."""
-    if not await _need(update):
+    """Naya admin banao (group me) — OWNER only (admin ko ye permission nahi di)."""
+    if not await _need_owner(update):
         return
     uid = _target_uid(update, context)
     if not uid:
@@ -3943,9 +4165,80 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(answer)
 
 
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: admins banao/hatao — bina redeploy.
+
+    /admin add 123456789 Admin 1
+    /admin remove 123456789
+    /admin list
+    Admin ko sirf: post, posts, del, pin, kick, unkick. Owner wali koi
+    permission nahi.
+    """
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    msg = update.effective_message
+    args = context.args or []
+    op = (args[0].lower() if args else "list")
+
+    def _ids():
+        seen, out = set(), []
+        for a in list(ADMIN_IDS) + [int(k) for k in db_admins()]:
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+        return out
+
+    if op in ("list", "show"):
+        out = [bd("ADMINS"), ""]
+        if not _ids():
+            out.append(sc("koi admin nahi hai"))
+        for a in _ids():
+            src = "env" if a in ADMIN_IDS else "db"
+            out.append(f"🛡 {bd(admin_name(a))}")
+            out.append(f"   {sc('id')} {a}   ({src})")
+        out += ["", f"{sc('add')}: /admin add <id> <naam>",
+                f"{sc('remove')}: /admin remove <id>"]
+        await _send_long(msg, "\n".join(out))
+        return
+
+    if op in ("add", "set"):
+        if len(args) < 2:
+            await msg.reply_text(f"{sc('use')}: /admin add <user_id> <naam>")
+            return
+        try:
+            uid = int(args[1])
+        except ValueError:
+            await msg.reply_text(f"{sc('user id numeric honi chahiye')}")
+            return
+        name = " ".join(args[2:]).strip() or f"Admin {len(_ids()) + 1}"
+        db_admin_add(uid, name)
+        await msg.reply_text(
+            f"{sc('admin add')}: {bd(name)} ({uid})\n"
+            f"{sc('permissions')}: post, posts, del, pin, kick, unkick")
+        return
+
+    if op in ("remove", "del", "rm"):
+        if len(args) < 2:
+            await msg.reply_text(f"{sc('use')}: /admin remove <user_id>")
+            return
+        try:
+            uid = int(args[1])
+        except ValueError:
+            await msg.reply_text(f"{sc('user id numeric honi chahiye')}")
+            return
+        ok = db_admin_del(uid)
+        await msg.reply_text(f"{sc('admin remove')}: {uid}" if ok
+                             else f"{sc('ye id DB admins me nahi hai')}"
+                                  f" ({sc('env wale ko Render se hatao')})")
+        return
+
+    await msg.reply_text(f"{sc('use')}: /admin add|remove|list")
+
+
 async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner -> owner + admins. Admin -> sirf admins (owner ki id nahi dikhti)."""
-    if not is_privileged(update.effective_user.id):
+    """Team list — OWNER only."""
+    if not await _need_owner(update):
         return
     viewer = update.effective_user.id
     sc, bd = fonts.small_caps, fonts.bold
@@ -3958,7 +4251,7 @@ async def cmd_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for a in ADMIN_IDS:
         if not is_owner(viewer) and a == OWNER_ID:
             continue          # admin ko owner ki id nahi dikhani
-        out.append(f"🛡 {bd(admin_label(a))}")
+        out.append(f"🛡 {bd(admin_name(a))}")
         out.append(f"   {sc('id')} : {a}")
         shown += 1
     if not shown:
@@ -4225,9 +4518,9 @@ VISION_PROMPT = (
 
 
 # ---------- channel chunne wale buttons ----------
-def _channel_rows(sel) -> list:
+def _channel_rows(sel, channels=None) -> list:
     rows = []
-    for row in POST_CHANNELS:
+    for row in (channels or POST_CHANNELS):
         r = []
         for name, cid in row:
             c = _norm_chat_id(cid)
@@ -4243,7 +4536,11 @@ async def _post_channel_kb(chat_id, context, uid, edit_msg=None):
     fl = _post_flow.get(uid)
     if not fl:
         return
-    kb = InlineKeyboardMarkup(_channel_rows(set(fl.get("channels") or [])))
+    # Admin ko sirf ADMIN_CHANNELS dikhte hain (owner ke channels nahi).
+    _ch = POST_CHANNELS
+    if not is_owner(uid) and ADMIN_CHANNELS:
+        _ch = [list(ADMIN_CHANNELS)]
+    kb = InlineKeyboardMarkup(_channel_rows(set(fl.get("channels") or []), _ch))
     txt = (f"{fonts.bold('Where should it be posted?')}\n"
            f"{fonts.small_caps('pick one or more, then tap Done')}")
     if edit_msg is not None:
@@ -4541,6 +4838,15 @@ async def _send_post(context, code):
         if still:
             log.error("Post in channels me nahi gaya: %s", still)
     if ok:
+        # Post-target channels ka id yaad karo (taaki bot unhe apne community
+        # me na gine) — par chat ko learn NAHI karte.
+        for cid in chans:
+            try:
+                _ch = await context.bot.get_chat(cid)
+                if getattr(_ch, "username", None):
+                    db_post_id_set(_ch.username, _ch.id)
+            except Exception:
+                pass
         db_post_update(code, posted=True, posted_at=_now())
     return ok
 
@@ -4816,6 +5122,96 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{sc('restart ke baad khud chalega')}.")
 
 
+async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: strict force-join gate — runtime se, bina redeploy.
+
+    /gate                       -> status
+    /gate on | off
+    /gate add @username Naam    -> ek channel gate me jodo
+    /gate remove Naam
+    Jab tak user in saare channels ko join nahi karta, post ka link NAHI
+    milega (MIN_JOINS_REQUIRED="all").
+    """
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    msg = update.effective_message
+    args = context.args or []
+    op = (args[0].lower() if args else "list")
+
+    if op in ("list", "status", "show", ""):
+        await _ensure_gate_links(context)
+        blocks = _gate_blocks()
+        out = [bd("GATE"), "",
+               f"{sc('status')} : {bd('ON') if blocks else bd('OFF')}",
+               f"{sc('channels')} : {bd(str(len(blocks)))}",
+               f"{sc('need')} : {bd(str(required_count()))} "
+               f"({sc('MIN_JOINS_REQUIRED')})", ""]
+        for b in blocks:
+            cid = _block_chat_id(b)
+            out.append(f"• {b['name']} — {sc('id')} {cid if cid else bd('NO ID')}")
+        if not blocks:
+            out += [f"{sc('gate band hai — koi channel join karna zaroori nahi')}", "",
+                    f"{sc('add')}: /gate add @channel Naam"]
+        else:
+            out += ["", f"{sc('add')}: /gate add @channel Naam",
+                    f"{sc('off')}: /gate off"]
+        await _send_long(msg, "\n".join(out))
+        return
+
+    if op in ("on", "off"):
+        db_gate_on(op == "on")
+        await msg.reply_text(f"{sc('gate')}: {bd(op.upper())}")
+        return
+
+    if op in ("add", "set"):
+        if len(args) < 2:
+            await msg.reply_text(f"{sc('use')}: /gate add @channel Naam")
+            return
+        target = args[1].strip()
+        name = " ".join(args[2:]).strip() or target.lstrip("@")
+        if not target.startswith("@") and not target.lstrip("-").isdigit():
+            await msg.reply_text(f"{sc('@username ya numeric id do')}")
+            return
+        cid = None
+        try:
+            ch = await context.bot.get_chat(target)
+            cid = ch.id
+            name = name or (ch.title or target)
+        except Exception as e:
+            await msg.reply_text(
+                f"{bd('ID NAHI MILI')} — {_err_hint(e)}\n\n"
+                f"{sc('bot ko us channel me ADMIN banao, phir dobara')} /gate add")
+            return
+        url = f"https://t.me/{target.lstrip('@')}" if target.startswith("@") else None
+        if not url:
+            try:
+                link = await context.bot.create_chat_invite_link(cid, name="gate")
+                url = link.invite_link
+            except Exception:
+                url = None
+        if not url:
+            await msg.reply_text(f"{sc('channel ka link nahi bana — @username do')}")
+            return
+        db_gate_add(name, url, cid)
+        await msg.reply_text(
+            f"{sc('gate me joda')}: {bd(name)}\n{sc('id')} {cid}\n"
+            f"{sc('ab ye join karna zaroori hai')}")
+        return
+
+    if op in ("remove", "del", "rm"):
+        if len(args) < 2:
+            await msg.reply_text(f"{sc('use')}: /gate remove <naam>")
+            return
+        name = " ".join(args[1:]).strip()
+        ok = db_gate_del(name)
+        await msg.reply_text(f"{sc('hata diya')}: {name}" if ok
+                             else f"{sc('ye naam gate me nahi hai')}")
+        return
+
+    await msg.reply_text(f"{sc('use')}: /gate on|off|add|remove|list")
+
+
 # =====================================================================
 #  PRIVACY  (PRIV-01)  —  /privacy, /delete_my_data, /audit
 # =====================================================================
@@ -4872,7 +5268,10 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 .replace("{bot}", BOT_USERNAME))
     if PRIVACY_URL:
         text += f"\n\nFull policy: {PRIVACY_URL}"
-    text += "\n\nSend /delete_my_data to erase your record now."
+    # Command ka naam yahan NAHI likhte (user ne kaha: kahin advertise na ho).
+    # Poora policy + deletion ka tareeka PRIVACY.md (GitHub) par hai.
+    if not PRIVACY_URL:
+        log.info("PRIVACY_URL set nahi hai — policy link ke bina /privacy chal raha hai")
     await _send_long(update.effective_message, text)
 
 
@@ -4985,6 +5384,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("members", cmd_members))
     app.add_handler(CommandHandler("autopost", cmd_autopost))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(CommandHandler("gate", cmd_gate))
+    app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("perms", cmd_perms))

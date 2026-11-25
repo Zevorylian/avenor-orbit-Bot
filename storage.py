@@ -237,7 +237,8 @@ def db_default() -> dict:
             "stats": {"total_started": 0}, "chat_ids": {}, "chats": {},
             "requests": {}, "done": {}, "posts": {}, "links": {},
             "audit": [], "ai_usage": {}, "growth": {}, "audience": {},
-            "autopost": {}}
+            "autopost": {}, "admins": {}, "post_ids": {},
+            "gate": {"on": False, "blocks": []}, "gate_links": {}}
 
 
 def _db_load_json():
@@ -508,7 +509,7 @@ def _shrink(data) -> list:
     audit). Har prune log hota hai + owner ko alert jata hai."""
     notes = []
     posts = data.get("posts") or {}
-    keep_posts = max(10, min(POSTS_KEEP, 50))
+    keep_posts = max(10, min(POSTS_KEEP, 500))   # post links asli data hain
     if len(posts) > keep_posts:
         order = sorted(posts.items(), key=lambda kv: (kv[1] or {}).get("created", ""))
         for code, _ in order[: len(posts) - keep_posts]:
@@ -1042,6 +1043,97 @@ def db_stats():
             "banned": len(data["banned"]),
             "referrals": sum(v.get("count", 0) for v in data["referrals"].values()),
         }
+
+
+def db_gate() -> dict:
+    """Runtime force-join gate: {on: bool, blocks: [{name,url,id}]}."""
+    with _db_lock:
+        g = db_load().get("gate") or {}
+        return {"on": bool(g.get("on")), "blocks": list(g.get("blocks") or [])}
+
+
+def db_gate_on(value=True) -> None:
+    with _db_lock:
+        d = db_load()
+        g = d.setdefault("gate", {"on": False, "blocks": []})
+        g["on"] = bool(value)
+        db_save(d)
+
+
+def db_gate_add(name, url, chat_id=None) -> None:
+    with _db_lock:
+        d = db_load()
+        g = d.setdefault("gate", {"on": False, "blocks": []})
+        blocks = [b for b in (g.get("blocks") or [])
+                  if str(b.get("name", "")).strip().lower() != str(name).strip().lower()]
+        blocks.append({"name": str(name)[:40], "url": str(url)[:200],
+                       "id": chat_id})
+        g["blocks"] = blocks
+        g["on"] = True
+        db_save(d)
+
+
+def db_gate_del(name) -> bool:
+    with _db_lock:
+        d = db_load()
+        g = d.setdefault("gate", {"on": False, "blocks": []})
+        before = len(g.get("blocks") or [])
+        g["blocks"] = [b for b in (g.get("blocks") or [])
+                       if str(b.get("name", "")).strip().lower() != str(name).strip().lower()]
+        if len(g["blocks"]) != before:
+            db_save(d)
+            return True
+        return False
+
+
+def db_gate_link_set(chat_id, url) -> None:
+    """Gate channel ka ASLI join link (invite link) yaad rakho."""
+    with _db_lock:
+        d = db_load()
+        d.setdefault("gate_links", {})[str(chat_id)] = str(url)[:200]
+        db_save(d)
+
+
+def db_gate_links() -> dict:
+    with _db_lock:
+        return dict(db_load().get("gate_links", {}))
+
+
+def db_post_id_set(key, chat_id) -> None:
+    """Post-target channel ka username -> numeric id (memory se bahar)."""
+    with _db_lock:
+        d = db_load()
+        d.setdefault("post_ids", {})[str(key).strip().lower()] = int(chat_id)
+        db_save(d)
+
+
+def db_post_ids() -> dict:
+    with _db_lock:
+        return dict(db_load().get("post_ids", {}))
+
+
+def db_admins() -> dict:
+    """Owner ke banaye admins ({uid: name}) — env ADMIN_IDS ke ilawa."""
+    with _db_lock:
+        return dict(db_load().get("admins", {}))
+
+
+def db_admin_add(uid, name="") -> None:
+    with _db_lock:
+        d = db_load()
+        d.setdefault("admins", {})[str(int(uid))] = str(name or "")[:40]
+        db_save(d)
+
+
+def db_admin_del(uid) -> bool:
+    with _db_lock:
+        d = db_load()
+        a = d.setdefault("admins", {})
+        if str(int(uid)) in a:
+            a.pop(str(int(uid)), None)
+            db_save(d)
+            return True
+        return False
 
 
 def db_autopost_set(chat_id, at, text) -> None:
