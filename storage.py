@@ -236,7 +236,8 @@ def db_default() -> dict:
     return {"users": {}, "referrals": {}, "banned": [],
             "stats": {"total_started": 0}, "chat_ids": {}, "chats": {},
             "requests": {}, "done": {}, "posts": {}, "links": {},
-            "audit": [], "ai_usage": {}, "growth": {}, "audience": {}}
+            "audit": [], "ai_usage": {}, "growth": {}, "audience": {},
+            "autopost": {}}
 
 
 def _db_load_json():
@@ -1041,6 +1042,46 @@ def db_stats():
             "banned": len(data["banned"]),
             "referrals": sum(v.get("count", 0) for v in data["referrals"].values()),
         }
+
+
+def db_autopost_set(chat_id, at, text) -> None:
+    """Ek chat ke liye roz ka auto-post (bina command ke bhejne wala)."""
+    with _db_lock:
+        d = db_load()
+        d.setdefault("autopost", {})[str(chat_id)] = {
+            "at": str(at)[:5], "text": str(text)[:800], "set": _now()}
+        db_save(d)
+
+
+def db_autopost_del(chat_id) -> bool:
+    with _db_lock:
+        d = db_load()
+        ap = d.setdefault("autopost", {})
+        if str(chat_id) in ap:
+            ap.pop(str(chat_id), None)
+            db_save(d)
+            return True
+        return False
+
+
+def db_autopost_all() -> dict:
+    with _db_lock:
+        return dict(db_load().get("autopost", {}))
+
+
+def db_chat_flag_set(chat_id, flag) -> None:
+    """Chat par chhota nishaan (jaise 'intro bhej diya')."""
+    with _db_lock:
+        d = db_load()
+        c = d.setdefault("chats", {}).setdefault(str(chat_id), {})
+        c[str(flag)] = 1
+        db_save(d)
+
+
+def db_chat_flag(chat_id, flag) -> bool:
+    with _db_lock:
+        c = db_load().get("chats", {}).get(str(chat_id)) or {}
+        return bool(c.get(str(flag)))
 
 
 def db_audience_add(chat_id, uid, name="", src="", status="member") -> None:

@@ -164,6 +164,8 @@ from config import (
     JOIN_DM_COOLDOWN_H,
     EPHEMERAL_WELCOME,
     REACTION_TRACK,
+    AUTO_INTRO,
+    AUTOPOST_ENABLED,
     INLINE_MODE,
     INLINE_CACHE,
     GROWTH_SNAPSHOT,
@@ -202,7 +204,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-12"
+BOT_BUILD = "2026-11-25 · mahiru-persona-13"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -235,6 +237,11 @@ from storage import (
     db_growth,
     db_audience_add,
     db_audience_summary,
+    db_autopost_set,
+    db_autopost_del,
+    db_autopost_all,
+    db_chat_flag,
+    db_chat_flag_set,
     db_user_exists,
     db_all_users,
     db_is_banned,
@@ -1540,6 +1547,7 @@ _COMMANDS = [
     ("audience",  "who is in your audience, and from where", "owner"),
     ("sync",      "re-check every chat the bot knows",    "owner"),
     ("members",   "real member list (needs MTProto setup)", "owner"),
+    ("autopost",  "daily auto message in this chat",      "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
     ("getid",     "get a chat's numeric ID",           "owner"),
     ("setid",     "bind a block to a chat ID",         "owner"),
@@ -1568,21 +1576,22 @@ def _owner_actions() -> dict:
         "broadcast": cmd_broadcast, "btnstyle": cmd_btnstyle,
         "admins": cmd_admins, "perms": cmd_perms, "getid": cmd_getid,
         "setid": cmd_setid, "ban": cmd_ban, "unban": cmd_unban,
-        "members": cmd_members,
+        "members": cmd_members, "autopost": cmd_autopost,
     }
 
 
 def _owner_panel_kb() -> InlineKeyboardMarkup:
     acts = ["stats", "diag", "chats", "audience", "sync", "mongo",
             "links", "posts", "audit", "broadcast", "btnstyle", "admins",
-            "perms", "getid", "setid", "ban", "unban", "members"]
+            "perms", "getid", "setid", "ban", "unban", "members",
+            "autopost"]
     labels = {"stats": "📊 Stats", "diag": "🩺 Diag", "chats": "💬 Chats",
               "audience": "👥 Audience", "sync": "🔄 Sync", "mongo": "🗄 Mongo",
               "links": "🔗 Links", "posts": "📝 Posts", "audit": "🧾 Audit",
               "broadcast": "📣 Broadcast", "btnstyle": "🎨 Buttons",
               "admins": "🛡 Admins", "perms": "🔑 Perms", "getid": "🆔 Get ID",
               "setid": "📌 Set ID", "ban": "⛔ Ban", "unban": "✅ Unban",
-              "members": "📇 Members"}
+              "members": "📇 Members", "autopost": "⏰ Auto-post"}
     rows, row = [], []
     for a in acts:
         row.append(_btn(labels.get(a, a), callback_data=f"owner:{a}",
@@ -3303,6 +3312,42 @@ async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("User %s joined %s — request record hataya (asli membership hai)", usr.id, chat.id)
 
 
+def _intro_kb(context) -> InlineKeyboardMarkup:
+    _u = getattr(context.bot, "username", None) or BOT_USERNAME
+    return InlineKeyboardMarkup([
+        [_btn("say hi to Mahiru",
+              url=f"https://t.me/{_u}?start=src_intro", style="primary")],
+        [_btn("Avenor Apps AI", url=CHANNEL_LINK),
+         _btn("Avenor AI Community", url=COMMUNITY_LINK)],
+    ])
+
+
+async def _auto_intro(context, chat) -> None:
+    """Bot ko chat me add kiya gaya -> WAHIN ek intro (bina kisi command ke).
+
+    Yahi wo "auto" hai jo missing tha: pehle add hone par sirf owner ko DM
+    jaata tha (aur wo bhi NOTIFY_OWNER=False par nahi), group me kuch nahi
+    aata tha — isliye lagta tha bot chala hi nahi.
+    """
+    if not AUTO_INTRO:
+        return
+    if db_chat_flag(chat.id, "intro"):
+        return                          # ek hi baar, hamesha ke liye
+    is_channel = str(getattr(chat, "type", "")) == "channel"
+    if is_channel:
+        text = ("main mahiru hoon — is channel me rehungi.\n\n"
+                "naye apps, tools aur updates yahin aate hain.")
+    else:
+        text = ("hey — main mahiru hoon. ab is group me rehti hoon.\n\n"
+                "kuch bhi poocho, ya mujhe tag karo. chup-chaap baithi "
+                "nahi rahungi.")
+    sent = await _safe(context.bot.send_message, chat.id, text,
+                       reply_markup=_intro_kb(context))
+    if sent is not None:
+        db_chat_flag_set(chat.id, "intro")
+        log.info("Auto-intro bheja: %s (%s)", chat.title, chat.id)
+
+
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bot ko jab kisi channel/group me add ya admin banaya jaye -> Telegram
     turant us chat ki id + title bhejta hai. Yahi sabse aasan tareeka hai."""
@@ -3322,6 +3367,11 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Poori chat detail + status yaad rakho (title match kare to block bhi bind).
     learn_chat(update, status=status, force=True)
+
+    # NAYA add hua (pehle left/banned tha) -> wahin intro bhejo.
+    _old = str(getattr(getattr(cm, "old_chat_member", None), "status", "") or "")
+    if _old in (ChatMember.LEFT, ChatMember.BANNED, "left", "kicked"):
+        await _auto_intro(context, chat)
 
     # Sirf tab notify karo jab status badla ho (same event baar baar na aaye).
     if _chat_status.get(chat.id) == status:
@@ -4657,6 +4707,116 @@ async def cmd_posts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================================================
+#  AUTO-POST  —  bot khud bhejta hai, bina kisi command ke
+# =====================================================================
+async def _job_autopost(context: ContextTypes.DEFAULT_TYPE):
+    """Roz ka auto-post. Text DB se aata hai (restart ke baad bhi chalta hai)."""
+    cid = context.job.data
+    conf = db_autopost_all().get(str(cid))
+    if not conf or not conf.get("text"):
+        return
+    target = cid
+    try:
+        target = int(cid)
+    except (TypeError, ValueError):
+        pass
+    await _safe(context.bot.send_message, target, conf["text"])
+    log.info("Auto-post bheja: %s", cid)
+
+
+async def _rearm_autopost(app):
+    """Restart ke baad har chat ka auto-post dobara set karo."""
+    jq = getattr(app, "job_queue", None)
+    if jq is None:
+        return
+    from datetime import time as _t
+    for cid, conf in db_autopost_all().items():
+        try:
+            h, m = (int(x) for x in str(conf.get("at") or "").split(":"))
+            target = cid
+            try:
+                target = int(cid)
+            except (TypeError, ValueError):
+                pass
+            jq.run_daily(_job_autopost, time=_t(h, m, tzinfo=_IST),
+                         data=target, name=f"autopost:{cid}")
+            log.info("Auto-post re-armed: %s at %02d:%02d IST", cid, h, m)
+        except Exception as e:
+            log.warning("Auto-post re-arm fail (%s): %s", cid, e)
+
+
+async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner: is chat me roz ek message — bot khud bhejega, bina command ke.
+
+    /autopost 09:30 good morning ☁
+    /autopost off
+    """
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    msg = update.effective_message
+    if not AUTOPOST_ENABLED:
+        await msg.reply_text(f"{bd('AUTO-POST OFF')} — {sc('AUTOPOST_ENABLED=False')}")
+        return
+    chat = update.effective_chat
+    if str(chat.type) not in ("group", "supergroup", "channel"):
+        await msg.reply_text(f"{sc('ye command kisi group/channel ke andar chalao')}.")
+        return
+    args = context.args or []
+    conf = db_autopost_all().get(str(chat.id))
+    if not args:
+        if conf:
+            await msg.reply_text(
+                f"{bd('AUTO-POST')}\n{sc('time')} : {conf.get('at')} IST\n"
+                f"{sc('text')} : {conf.get('text')}\n\n"
+                f"{sc('band karne ke liye')}: /autopost off")
+        else:
+            await msg.reply_text(
+                f"{bd('AUTO-POST')} — {sc('abhi set nahi hai')}\n\n"
+                f"/autopost 09:30 good morning ☁\n"
+                f"/autopost off")
+        return
+    if str(args[0]).lower() in ("off", "stop", "band"):
+        ok = db_autopost_del(chat.id)
+        jq = getattr(context.application, "job_queue", None)
+        if jq is not None:
+            for j in jq.get_jobs_by_name(f"autopost:{chat.id}"):
+                j.schedule_removal()
+        await msg.reply_text(f"{sc('auto-post band')}" if ok
+                             else f"{sc('pehle se band hai')}")
+        return
+    _m = re.match(r"^(\d{1,2}):(\d{2})$", str(args[0]))
+    if not _m:
+        await msg.reply_text(
+            f"{sc('format')}: /autopost 09:30 <message>\n"
+            f"{sc('ya')}: /autopost off")
+        return
+    h, mi = int(_m.group(1)), int(_m.group(2))
+    if not (0 <= h < 24 and 0 <= mi < 60):
+        await msg.reply_text(f"{sc('time galat hai')} — 00:00 se 23:59")
+        return
+    text = " ".join(args[1:]).strip()
+    if not text:
+        await msg.reply_text(f"{sc('message bhi likho')}: /autopost 09:30 good morning")
+        return
+    db_autopost_set(chat.id, f"{h:02d}:{mi:02d}", text)
+    jq = getattr(context.application, "job_queue", None)
+    if jq is not None:
+        from datetime import time as _t
+        for j in jq.get_jobs_by_name(f"autopost:{chat.id}"):
+            j.schedule_removal()
+        jq.run_daily(_job_autopost, time=_t(h, mi, tzinfo=_IST),
+                     data=chat.id, name=f"autopost:{chat.id}")
+        await msg.reply_text(
+            f"{bd('AUTO-POST SET')}\n{sc('roz')} {h:02d}:{mi:02d} IST\n"
+            f"{sc('text')} : {text[:120]}")
+    else:
+        await msg.reply_text(
+            f"{sc('set to gaya par job-queue nahi hai')} — "
+            f"{sc('restart ke baad khud chalega')}.")
+
+
+# =====================================================================
 #  PRIVACY  (PRIV-01)  —  /privacy, /delete_my_data, /audit
 # =====================================================================
 def _forget_memory(uid) -> int:
@@ -4824,6 +4984,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("audience", cmd_audience))
     app.add_handler(CommandHandler("sync", cmd_sync))
     app.add_handler(CommandHandler("members", cmd_members))
+    app.add_handler(CommandHandler("autopost", cmd_autopost))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("perms", cmd_perms))
@@ -4905,6 +5066,7 @@ def run_webhook(app: Application):
         await _start_mongo(app)
         await verify_blocks_on_startup(app)
         await _rearm_posts(app)
+        await _rearm_autopost(app)
         _schedule_maintenance(app)
         await app.bot.set_webhook(
             url=f"{WEBHOOK_URL}{webhook_path}",
@@ -5095,6 +5257,7 @@ async def _polling_post_init(app: Application):
     await _start_mongo(app)
     await verify_blocks_on_startup(app)
     await _rearm_posts(app)
+    await _rearm_autopost(app)
     _schedule_maintenance(app)
 
 

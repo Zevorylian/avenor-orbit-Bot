@@ -482,6 +482,14 @@ EPHEMERAL_WELCOME = _bool_env("EPHEMERAL_WELCOME", True)
 # tareeka hai.
 REACTION_TRACK = _bool_env("REACTION_TRACK", True)
 
+# ---- AUTO BEHAVIOUR (bot khud kya kare, bina command ke) --------------
+# Bot ko group/channel me add kiya jaye to wahin ek intro message bhejti hai
+# (owner ko DM nahi — group me hi, taaki sab dekhein ki bot zinda hai).
+AUTO_INTRO = _bool_env("AUTO_INTRO", True)
+# Auto-post: owner /autopost se ek roz ka message set kare to bot khud
+# bhejta hai (bina command ke). Default OFF — spam ka risk na ho.
+AUTOPOST_ENABLED = _bool_env("AUTOPOST_ENABLED", True)
+
 # ---- MTProto ROSTER (optional, default OFF) --------------------------
 # Bot API member list nahi deta. MTProto ka channels.getParticipants
 # officially bot-callable hai — par uske liye api_id + api_hash chahiye
