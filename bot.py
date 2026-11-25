@@ -201,7 +201,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-24 · mahiru-persona-9"
+BOT_BUILD = "2026-11-25 · mahiru-persona-10"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1279,11 +1279,19 @@ async def _set_commands(app: Application):
     commands hain hi nahi. Default = member ke commands; ADMIN_IDS ko uske
     admin commands; OWNER ko sabhi."""
     from telegram import (BotCommand, BotCommandScopeDefault, BotCommandScopeChat)
-    def _name(c):
-        return POST_COMMAND if c == "POSTCMD" else c
-    member = [BotCommand(_name(c), d) for c, d, r in _COMMANDS if r == "member"]
-    admin = [BotCommand(_name(c), d) for c, d, r in _COMMANDS if r in ("member", "admin")]
-    every = [BotCommand(_name(c), d) for c, d, r in _COMMANDS]
+    desc = {c: d for c, d, _r in _COMMANDS}
+
+    def _bc(name):
+        c = POST_COMMAND if name == "POSTCMD" else name
+        return BotCommand(c, desc.get(name, name))
+
+    # MEMBER ko sirf 6 commands dikhte hain — baaki sab menu se gayab.
+    # (Handlers waise hi kaam karte hain, par menu saaf rehta hai.)
+    member = [_bc(c) for c in _MEMBER_MENU]
+    # ADMIN ko member ke + group ke tools.
+    admin = member + [_bc(c) for c in _ADMIN_MENU]
+    # OWNER ko sirf member + /owner — poora control ek hi command ke andar.
+    owner = member + [_bc("owner")]
     try:
         await app.bot.set_my_commands(member, scope=BotCommandScopeDefault())
         log.info("Commands menu set (%s default commands).", len(member))
@@ -1296,8 +1304,8 @@ async def _set_commands(app: Application):
             pass
     if OWNER_ID:
         try:
-            await app.bot.set_my_commands(every, scope=BotCommandScopeChat(chat_id=OWNER_ID))
-            log.info("Owner command menu set (%s commands).", len(every))
+            await app.bot.set_my_commands(owner, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+            log.info("Owner command menu set (%s commands).", len(owner))
         except Exception:
             pass
 
@@ -1538,7 +1546,66 @@ _COMMANDS = [
     ("unban",     "lift a bot ban",                    "owner"),
     ("audit",     "recent admin actions",               "owner"),
     ("btnstyle",  "test button colours",               "owner"),
+    ("owner",     "owner panel — everything in one place", "owner"),
 ]
+
+
+# Menu me kaun-kaun dikhega (handlers sabhi kaam karte rahenge).
+_MEMBER_MENU = ["start", "help", "ai", "rules", "report", "privacy"]
+_ADMIN_MENU = ["admins", "settitle", "invitelink", "kick", "unkick", "del",
+               "pin", "promote", "POSTCMD", "posts"]
+
+
+def _owner_actions() -> dict:
+    """Owner panel ke buttons -> command function. Lazy dict (functions neeche
+    define hain, isliye call ke waqt hi dekhe jaate hain)."""
+    return {
+        "stats": cmd_stats, "diag": cmd_diag, "chats": cmd_chats,
+        "audience": cmd_audience, "sync": cmd_sync, "mongo": cmd_mongo,
+        "links": cmd_links, "posts": cmd_posts, "audit": cmd_audit,
+        "broadcast": cmd_broadcast, "btnstyle": cmd_btnstyle,
+        "admins": cmd_admins, "perms": cmd_perms, "getid": cmd_getid,
+        "setid": cmd_setid, "ban": cmd_ban, "unban": cmd_unban,
+    }
+
+
+def _owner_panel_kb() -> InlineKeyboardMarkup:
+    acts = ["stats", "diag", "chats", "audience", "sync", "mongo",
+            "links", "posts", "audit", "broadcast", "btnstyle", "admins",
+            "perms", "getid", "setid", "ban", "unban"]
+    labels = {"stats": "📊 Stats", "diag": "🩺 Diag", "chats": "💬 Chats",
+              "audience": "👥 Audience", "sync": "🔄 Sync", "mongo": "🗄 Mongo",
+              "links": "🔗 Links", "posts": "📝 Posts", "audit": "🧾 Audit",
+              "broadcast": "📣 Broadcast", "btnstyle": "🎨 Buttons",
+              "admins": "🛡 Admins", "perms": "🔑 Perms", "getid": "🆔 Get ID",
+              "setid": "📌 Set ID", "ban": "⛔ Ban", "unban": "✅ Unban"}
+    rows, row = [], []
+    for a in acts:
+        row.append(_btn(labels.get(a, a), callback_data=f"owner:{a}",
+                        style="primary"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+
+async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER PANEL — saari owner powers ek jagah.
+
+    Non-owner ko kuch bhi nahi milta: na panel, na hint, na "not allowed".
+    (Agar pata chal jaye ki upar koi tier hai, to admin bhi apne se kam
+    samajhne lagega — isliye poora silence.)
+    """
+    if not is_owner(update.effective_user.id):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    text = (f"{bd('OWNER PANEL')}\n\n"
+            f"{sc('sab kuch yahin se')}. {sc('jo button dabao, wahi command chalega')}.\n\n"
+            f"{sc('text commands')}: /stats /diag /audience /sync /broadcast …")
+    await update.effective_message.reply_text(
+        text, reply_markup=_owner_panel_kb())
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2470,6 +2537,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Deletion ka record audit log me NAHI daalte — warna wahi user ka
         # data dobara likh jata. Sirf server log me.
         log.info("PRIVACY: user %s ne apna data delete kiya (%s)", user.id, res)
+        return
+
+    if data.startswith("owner:"):
+        # BYPASS-PROOF: permission YAHAN check hoti hai, button render par nahi.
+        # Non-owner ko na action milta hai, na hint.
+        if not is_owner(user.id):
+            await q.answer()
+            log.warning("Owner panel callback blocked for %s (%s)", user.id, data)
+            return
+        act = data.split(":", 1)[1]
+        fn = _owner_actions().get(act)
+        await q.answer()
+        if fn is None:
+            return
+        try:
+            await fn(update, context)
+        except Exception as e:
+            log.warning("Owner panel action %s fail: %s", act, e)
+            await _safe(context.bot.send_message, update.effective_chat.id,
+                        f"Failed: {_err_hint(e)}")
         return
 
     if data.startswith("bs:"):
@@ -4573,6 +4660,7 @@ def build_application() -> Application:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("owner", cmd_owner))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("ref", cmd_ref))
     app.add_handler(CommandHandler("stats", cmd_stats))
