@@ -201,7 +201,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-10"
+BOT_BUILD = "2026-11-25 · mahiru-persona-11"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -2351,6 +2351,11 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('groups')} : {bd('can be added') if getattr(me, 'can_join_groups', True) else bd('BLOCKED — BotFather me groups off hain')}",
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
+           f"{sc('dm sent')} : {bd(str(_eph_stats['sent']))} "
+           f"({sc('skip admin')} {_eph_stats['skip_admin']}, "
+           f"{sc('unknown')} {_eph_stats['skip_unknown']}, "
+           f"{sc('cool')} {_eph_stats['skip_cool']}, "
+           f"{sc('fail')} {_eph_stats['fail']})",
            f"{sc('ai calls')} : {bd(str(_ai_stats['calls']))} "
            f"({sc('ok')} {_ai_stats['ok']}, {sc('fail')} {_ai_stats['fail']}, "
            f"{sc('timeout')} {_ai_stats['timeout']})",
@@ -2865,8 +2870,9 @@ async def on_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if member.is_bot:
             continue
         _note_audience(msg.chat_id, member, src="join", status="member")
-        # Group ke andar hi private welcome — sirf usi member ko dikhta hai.
-        await _ephemeral_welcome(context, msg.chat_id, member)
+        # Group ke andar hi private welcome — sirf usi member ko dikhta hai
+        # (aur admin/owner ko bilkul nahi).
+        await _ephemeral_welcome(context, msg.chat, member)
         if WELCOME_TEMPLATE:
             try:
                 caption = WELCOME_TEMPLATE.format(
@@ -2920,24 +2926,94 @@ def _note_audience(chat_id, user, src=None, status="member") -> None:
 async def _send_ephemeral(bot, chat_id, user_id, text, kb=None):
     """Group me EK hi user ko message — baaki members ko dikhta hi nahi.
 
-    Bot API 10.3+ ka "ephemeral message". PTB 22.8 me iska parameter nahi
-    hai, isliye raw `api_kwargs` se bhejte hain (wahi tareeka jo button
-    colour ke liye use hota hai). Shart: bot us group me ADMIN ho — tab wo
-    kisi bhi non-bot member ko, kabhi bhi, bhej sakta hai.
-    Delivery guaranteed nahi hai (user offline ho to nahi milega), isliye
-    ise "extra" maano, "guarantee" nahi.
+    Bot API 10.3+ ka "ephemeral message". PTB 22.8 me typed parameter nahi
+    hai, par PTB ka **official extension point** `do_api_request()` hai
+    (api_kwargs hack se behtar — yahi docs me recommend kiya gaya hai).
+    Shart: bot us group me ADMIN ho; delivery guaranteed nahi.
     """
-    kw = {"ephemeral_message_parameters": {"receiver_user_id": int(user_id)}}
-    args = (chat_id, text)
-    extra = {"api_kwargs": kw}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "ephemeral_message_parameters": {"receiver_user_id": int(user_id)},
+    }
     if kb is not None:
-        extra["reply_markup"] = kb
-    return await _safe(bot.send_message, *args, **extra)
+        payload["reply_markup"] = kb.to_dict()
+    try:
+        return await bot.do_api_request("sendMessage", api_kwargs=payload)
+    except Exception as e:
+        log.warning("Ephemeral send fail (%s -> %s): %s", chat_id, user_id, e)
+        return None
 
 
-async def _ephemeral_welcome(context, chat_id, member) -> None:
-    """Naye member ko group ke andar hi private welcome (sirf wahi dekhta hai)."""
+# Kis-kis ko private message NAHI karna (aur kyun).
+_eph_stats = {"sent": 0, "skip_admin": 0, "skip_unknown": 0, "skip_cool": 0,
+              "skip_own": 0, "fail": 0}
+_eph_at: dict = {}          # uid -> last ephemeral message ka time
+
+
+async def _chat_role(context, chat_id, uid):
+    """Us chat me user ka status ("creator"/"administrator"/"member"/...).
+    None = pata nahi chala (bot admin nahi / call fail) — fail-closed."""
+    try:
+        m = await context.bot.get_chat_member(chat_id=chat_id, user_id=uid)
+        return str(getattr(m, "status", "") or "")
+    except Exception as e:
+        log.info("Role check fail (%s, %s): %s", chat_id, uid, e)
+        return None
+
+
+async def _dm_allowed(context, chat_id, user):
+    """Kya is user ko group ke andar private message bhejna chahiye?
+
+    NAHI in cases (aur ye jaan-boojh kar):
+      • wo us chat ka ADMIN ya OWNER hai — usko unsolicited DM spam lagta hai,
+        aur wahi ek click me bot ko group se nikaal sakta hai
+      • uska role pata na chale (getChatMember fail) — fail-closed, chup raho
+      • wo hamara khud ka owner/admin hai
+      • wo bot hai
+      • usne pehle "nahi" bol diya tha
+      • usko thodi der pehle hi message bheja gaya (cooldown)
+    Returns (allowed, reason).
+    """
+    uid = int(user.id)
+    if getattr(user, "is_bot", False):
+        return False, "bot"
+    if is_privileged(uid):
+        _eph_stats["skip_own"] += 1
+        return False, "own"
+    st = _invite_state(uid)
+    if (st.get("declined")
+            and time.time() - float(st["declined"]) < INVITE_DECLINE_DAYS * 86400):
+        _eph_stats["skip_cool"] += 1
+        return False, "declined"
+    if JOIN_DM_COOLDOWN_H > 0:
+        if time.time() - _eph_at.get(uid, 0) < JOIN_DM_COOLDOWN_H * 3600:
+            _eph_stats["skip_cool"] += 1
+            return False, "cooldown"
+    role = await _chat_role(context, chat_id, uid)
+    if role is None:
+        _eph_stats["skip_unknown"] += 1
+        return False, "unknown"
+    if role in ("administrator", "creator", "owner"):
+        _eph_stats["skip_admin"] += 1
+        log.info("Private message SKIP: %s is %s in %s (admin ko DM nahi)",
+                 uid, role, chat_id)
+        return False, "admin"
+    return True, role or "member"
+
+
+async def _ephemeral_welcome(context, chat, member) -> None:
+    """Naye member ko group ke andar hi private welcome (sirf wahi dekhta hai).
+
+    ADMIN/OWNER ko kabhi nahi — dekho `_dm_allowed`.
+    """
     if not EPHEMERAL_WELCOME:
+        return
+    if str(getattr(chat, "type", "")) not in ("group", "supergroup"):
+        return                      # ephemeral sirf groups me chalta hai
+    ok, why = await _dm_allowed(context, chat.id, member)
+    if not ok:
+        log.info("Ephemeral welcome skip (%s) — %s", member.id, why)
         return
     _u = getattr(context.bot, "username", None) or BOT_USERNAME
     rows = [[_btn("say hi to Mahiru",
@@ -2948,11 +3024,16 @@ async def _ephemeral_welcome(context, chat_id, member) -> None:
             f"main mahiru hoon, isi group me rehti hoon. kuch bhi poochna ho "
             f"to yahin likh do ya mujhe private me message kar lo.\n\n"
             f"(ye message sirf tumhe dikh raha hai)")
-    sent = await _send_ephemeral(context.bot, chat_id, member.id, text,
+    sent = await _send_ephemeral(context.bot, chat.id, member.id, text,
                                  InlineKeyboardMarkup(rows))
     if sent is not None:
-        log.info("Ephemeral welcome bheja: %s (%s)", member.id, chat_id)
-        _note_audience(chat_id, member, src="ephemeral", status="member")
+        _eph_at[member.id] = time.time()
+        _prune(_eph_at, 5000)
+        _eph_stats["sent"] += 1
+        log.info("Ephemeral welcome bheja: %s (%s)", member.id, chat.id)
+        _note_audience(chat.id, member, src="ephemeral", status="member")
+    else:
+        _eph_stats["fail"] += 1
 
 
 async def on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2988,6 +3069,12 @@ async def _join_welcome_dm(context, req, chat) -> None:
     if not JOIN_DM:
         return
     usr = req.from_user
+    if is_privileged(usr.id) or getattr(usr, "is_bot", False):
+        return
+    _st = _invite_state(usr.id)
+    if (_st.get("declined")
+            and time.time() - float(_st["declined"]) < INVITE_DECLINE_DAYS * 86400):
+        return
     now = time.time()
     if now - _join_dm_at.get(usr.id, 0) < JOIN_DM_COOLDOWN_H * 3600:
         return
