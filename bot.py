@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-20"
+BOT_BUILD = "2026-11-25 · mahiru-persona-22"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -941,7 +941,7 @@ async def _notify_owner(bot, text):
     log.info("NOTIFY: %s", text.replace("\n", " | "))
     if not NOTIFY_OWNER:
         return
-    target = OWNER_ID or (ADMIN_IDS[0] if ADMIN_IDS else 0)
+    target = owner_id()
     if not target:
         return
     try:
@@ -1469,9 +1469,10 @@ async def _set_commands(app: Application):
             await app.bot.set_my_commands(admin, scope=BotCommandScopeChat(chat_id=uid))
         except Exception:
             pass
-    if OWNER_ID:
+    _oid = owner_id()
+    if _oid:
         try:
-            await app.bot.set_my_commands(owner, scope=BotCommandScopeChat(chat_id=OWNER_ID))
+            await app.bot.set_my_commands(owner, scope=BotCommandScopeChat(chat_id=_oid))
             log.info("Owner command menu set (%s commands).", len(owner))
         except Exception:
             pass
@@ -1505,9 +1506,9 @@ async def verify_blocks_on_startup(app: Application):
         log.info("button payload jo Telegram ko ja raha hai: %s", json.dumps(_sample))
     except Exception as e:
         log.warning("Button payload sample fail: %s", e)
-    if not OWNER_ID:
-        log.warning("No OWNER_ID and no ADMIN_IDS — nobody can run the owner "
-                    "commands (/diag, /setid, /broadcast). Set ADMIN_IDS on Render.")
+    if not owner_id():
+        log.warning("Koi owner set nahi hai — /claim se ek baar owner banao "
+                    "(ya Render me OWNER_ID daalo). Tab tak owner commands band.")
     _ready, _no_id = gate_report()
     if _no_id:
         log.warning("GATE NOT ENFORCING — no chat id for: %s. "
@@ -1682,6 +1683,7 @@ _COMMANDS = [
     ("start",    "open the bot, see our channels",     "member"),
     ("help",     "show this list",                     "member"),
     ("id",       "your Telegram user ID",              "member"),
+    ("me",       "what you can do here",              "member"),
     ("ai",       "ask the assistant a question",       "member"),
     ("rules",    "read the community rules",           "member"),
     ("report",   "report a message to the admins",     "member"),
@@ -1723,7 +1725,7 @@ _COMMANDS = [
 
 
 # Menu me kaun-kaun dikhega (handlers sabhi kaam karte rahenge).
-_MEMBER_MENU = ["start", "help", "ai", "rules", "report", "privacy"]
+_MEMBER_MENU = ["start", "help", "me", "ai", "rules", "report", "privacy"]
 # ADMIN ko sirf ye — posting + halki moderation. Owner wali koi cheez nahi.
 _ADMIN_MENU = ["POSTCMD", "posts", "del", "pin", "kick", "unkick"]
 
@@ -1850,6 +1852,42 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lvl == 2:
         out.append(f"{sc('★ = owner only')}")
     await _send_long(update.effective_message, "\n".join(out).strip())
+
+
+async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tumhara access: level, id, aur tumhare paas kaunsi commands hain.
+
+    Ye jaan-boojh kar member-level hai — admin ko sirf apni list dikhti hai,
+    owner tier ka koi zikr nahi. Isse "kuch kaam nahi kar raha" ka jawab
+    turant mil jata hai (silence ki jagah).
+    """
+    uid = update.effective_user.id
+    sc, bd = fonts.small_caps, fonts.bold
+    desc = {c: d for c, d, _r in _COMMANDS}
+    if is_owner(uid):
+        level, cmds = "owner", [c for c, d, r in _COMMANDS
+                                if r in ("member", "admin", "owner")]
+    elif is_admin(uid):
+        level, cmds = "admin", list(_MEMBER_MENU) + list(_ADMIN_MENU)
+    else:
+        level, cmds = "member", list(_MEMBER_MENU)
+    out = [bd("YOU"), "",
+           f"{sc('id')}    : {uid}",
+           f"{sc('level')} : {bd(level)}", ""]
+    out.append(f"{sc('commands tumhare paas')}:")
+    for c in cmds:
+        name = POST_COMMAND if c == "POSTCMD" else c
+        out.append(f"  /{name} — {desc.get(c, '')}")
+    if is_admin(uid) and not is_owner(uid):
+        ch = _channels_for(uid)
+        out += ["", f"{sc('post kahan ja sakta hai')}:"]
+        if ch:
+            for row in ch:
+                for nm, _cid in row:
+                    out.append(f"  • {nm}")
+        else:
+            out.append(f"  {sc('koi channel set nahi — owner se bolo')}")
+    await _send_long(update.effective_message, "\n".join(out))
 
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3934,8 +3972,9 @@ async def cmd_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{sc('msg')}  : {(r.text or r.caption or '[media]')[:300]}"
     )
     targets = list(ADMIN_IDS)
-    if OWNER_ID and OWNER_ID not in targets:
-        targets.insert(0, OWNER_ID)   # owner ko report hamesha mile
+    _oid = owner_id()
+    if _oid and _oid not in targets:
+        targets.insert(0, _oid)       # owner ko report hamesha mile
     sent = 0
     for a in targets:
         try:
@@ -4238,6 +4277,37 @@ async def cmd_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(answer)
 
 
+async def _refresh_menu(context, uid) -> None:
+    """Us user ka '/' menu turant set karo (role ke hisaab se).
+
+    ZAROORI BUG FIX: /admin add se naya admin banta tha par uska command menu
+    set hi nahi hota tha — usko /post menu me dikhta hi nahi tha aur lagta tha
+    "kuch kaam nahi kar raha". Ab add/remove par turant refresh hota hai.
+    """
+    from telegram import BotCommand, BotCommandScopeChat
+    desc = {c: d for c, d, _r in _COMMANDS}
+
+    def _bc(name):
+        c = POST_COMMAND if name == "POSTCMD" else name
+        return BotCommand(c, desc.get(name, name))
+
+    member = [_bc(c) for c in _MEMBER_MENU]
+    admin = member + [_bc(c) for c in _ADMIN_MENU]
+    owner = member + [_bc("owner")]
+    try:
+        if is_owner(uid):
+            cmds = owner
+        elif is_admin(uid):
+            cmds = admin
+        else:
+            cmds = member
+        await context.bot.set_my_commands(
+            cmds, scope=BotCommandScopeChat(chat_id=int(uid)))
+        log.info("Command menu refresh: %s (%s commands)", uid, len(cmds))
+    except Exception as e:
+        log.warning("Command menu refresh fail (%s): %s", uid, e)
+
+
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """OWNER: admins banao/hatao — bina redeploy.
 
@@ -4287,9 +4357,14 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         name = " ".join(args[2:]).strip() or f"Admin {len(_ids()) + 1}"
         db_admin_add(uid, name)
+        # Uska '/' menu TURANT set karo — warna naye admin ko /post menu me
+        # dikhta hi nahi aur lagta hai "kuch kaam nahi kar raha".
+        await _refresh_menu(context, uid)
         await msg.reply_text(
             f"{sc('admin add')}: {bd(name)} ({uid})\n"
-            f"{sc('permissions')}: post, posts, del, pin, kick, unkick")
+            f"{sc('permissions')}: post, posts, del, pin, kick, unkick\n\n"
+            f"{sc('uska / menu set ho gaya')} — "
+            f"{sc('wo chat band karke dobara kholega to naya menu dikhega')}")
         return
 
     if op in ("remove", "del", "rm"):
@@ -4302,6 +4377,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(f"{sc('user id numeric honi chahiye')}")
             return
         ok = db_admin_del(uid)
+        if ok:
+            await _refresh_menu(context, uid)  # wapis member menu
         await msg.reply_text(f"{sc('admin remove')}: {uid}" if ok
                              else f"{sc('ye id DB admins me nahi hai')}"
                                   f" ({sc('env wale ko Render se hatao')})")
@@ -5491,6 +5568,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("owner", cmd_owner))
     app.add_handler(CommandHandler("id", cmd_id))
+    app.add_handler(CommandHandler("me", cmd_me))
     app.add_handler(CommandHandler("ref", cmd_ref))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
