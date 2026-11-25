@@ -967,14 +967,38 @@ GATE_CHANNELS = [
      "url": "https://t.me/c/4498955231"},
 ]
 
-# ADMIN ke apne channels (jahan wo post kar sakte hain). Khali = admins
-# POST_CHANNELS hi dekhte hain. Format: "Naam=@username,Naam2=@username2"
-ADMIN_CHANNELS = []
-for _item in (os.getenv("ADMIN_CHANNELS", "") or "").split(","):
-    if "=" in _item:
-        _n, _u = _item.split("=", 1)
-        if _n.strip() and _u.strip():
-            ADMIN_CHANNELS.append((_n.strip()[:40], _u.strip()))
+# ---- ADMIN ke channels (CODE me — Render env ki zaroorat nahi) ---------
+# Admin SIRF in channels me post kar sakta hai. Owner ke apne channel
+# (Avenor Apps AI / Avenor AI Community) admin ko dikhte hi nahi.
+#
+# Ye wahi 5 channels hain jo owner ne ids ke saath diye. "ANIME WORLD" ka
+# doosra id (2072549849997) is list me NAHI hai — us id ka format galat hai
+# (supergroup id -100… hoti hai). Owner sahi id de to yahan ek line jod dena.
+ADMIN_CHANNELS = [
+    ("ANIME WORLD", -1002549849997),
+    ("ANIME NEWS", -1003910002446),
+    ("ANIME UNIVERSE", -1002493856027),
+    ("Hoyoverse Animes", -1003894555958),
+    ("Sarrows Banners", -1004498955231),
+]
+
+# Env se override (optional, sirf tab jab owner chahe):
+#   ADMIN_CHANNELS="Naam=@user,Naam2=@user2"
+_env_admin = (os.getenv("ADMIN_CHANNELS", "") or "").strip()
+if _env_admin:
+    _rows = []
+    for _item in _env_admin.split(","):
+        if "=" in _item:
+            _n, _u = _item.split("=", 1)
+            if _n.strip() and _u.strip():
+                _cid = _u.strip()
+                try:
+                    _cid = int(_cid)
+                except ValueError:
+                    pass
+                _rows.append((_n.strip()[:40], _cid))
+    if _rows:
+        ADMIN_CHANNELS = _rows
 
 POST_CHANNELS = [
     # Post kahan jayega. @username bhi chalega (numeric id ki tarah) — bot

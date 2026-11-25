@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-16"
+BOT_BUILD = "2026-11-25 · mahiru-persona-18"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1275,6 +1275,12 @@ def _post_only_chats() -> set:
             k = _cid_key(_norm_chat_id(cid))
             if k not in block_ids:
                 out.add(k)
+    # Admin ke channels bhi sirf post-target hain — bot unhe yaad nahi rakhta
+    # (warna unke users bhi apne count me aa jate).
+    for _name, cid in ADMIN_CHANNELS:
+        k = _cid_key(_norm_chat_id(cid))
+        if k not in block_ids:
+            out.add(k)
     # Username wale post targets ka numeric id bhi (jo humne seekha)
     for key, cid in db_post_ids().items():
         if _cid_key(cid) not in block_ids:
@@ -1294,6 +1300,10 @@ def _post_only_username(chat) -> bool:
             c = str(cid).strip().lower().lstrip("@")
             if c == uname and _cid_key("@" + c) not in block_ids:
                 return True
+    for _name, cid in ADMIN_CHANNELS:
+        c = str(cid).strip().lower().lstrip("@")
+        if c == uname and _cid_key("@" + c) not in block_ids:
+            return True
     return False
 
 
@@ -2815,6 +2825,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer()
             return
         t = data.split(":", 1)[1]
+        # Button render par nahi — CHALANE ke waqt check (bypass-proof).
+        if t not in _post_types_for(user.id):
+            await q.answer("Ye type tumhare liye nahi hai", show_alert=False)
+            log.warning("Post type blocked: %s tried %r", user.id, t)
+            return
+        if not _channels_for(user.id):
+            await q.answer("Koi channel set nahi hai", show_alert=True)
+            return
         _post_flow[user.id] = {"type": t, "step": 0, "data": {}, "channels": [],
                                "_t": time.time()}
         await q.answer()
@@ -4532,14 +4550,38 @@ def _channel_rows(sel, channels=None) -> list:
     return rows
 
 
+def _post_types_for(uid) -> list:
+    """Owner -> saare post types. Admin -> sirf Upload (anime/movie)."""
+    if is_owner(uid):
+        return list(POST_TYPES)
+    allowed = [t for t in POST_TYPES if t == "Upload"]
+    return allowed or ["Upload"]
+
+
+def _channels_for(uid) -> list:
+    """Owner -> POST_CHANNELS. Admin -> SIRF ADMIN_CHANNELS.
+
+    Khali ho to admin ko kuch nahi — jaan-boojh kar fail-closed, warna admin
+    galti se owner ke channel me post kar deta hai.
+    """
+    if is_owner(uid):
+        return POST_CHANNELS
+    if ADMIN_CHANNELS:
+        return [list(ADMIN_CHANNELS)]
+    return []
+
+
 async def _post_channel_kb(chat_id, context, uid, edit_msg=None):
     fl = _post_flow.get(uid)
     if not fl:
         return
     # Admin ko sirf ADMIN_CHANNELS dikhte hain (owner ke channels nahi).
-    _ch = POST_CHANNELS
-    if not is_owner(uid) and ADMIN_CHANNELS:
-        _ch = [list(ADMIN_CHANNELS)]
+    _ch = _channels_for(uid)
+    if not _ch:
+        await _safe(context.bot.send_message, chat_id,
+                    "Admin ke liye koi channel set nahi hai. Owner se bolo: "
+                    "Render me ADMIN_CHANNELS daalein.")
+        return
     kb = InlineKeyboardMarkup(_channel_rows(set(fl.get("channels") or []), _ch))
     txt = (f"{fonts.bold('Where should it be posted?')}\n"
            f"{fonts.small_caps('pick one or more, then tap Done')}")
@@ -4556,9 +4598,18 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Post builder — sirf Owner/Admin."""
     if not is_privileged(update.effective_user.id):
         return
-    if not POST_CHANNELS:
-        await update.effective_message.reply_text(
-            "No channels configured. Set POST_CHANNELS in config.py first.")
+    uid = update.effective_user.id
+    _ch = _channels_for(uid)
+    if not _ch:
+        # Admin ke liye alag message — owner ko pata chale ki kya karna hai.
+        if is_owner(uid):
+            await update.effective_message.reply_text(
+                "No channels configured. Set POST_CHANNELS in config.py first.")
+        else:
+            await update.effective_message.reply_text(
+                f"{fonts.bold('No channels for you yet')}\n\n"
+                f"{fonts.small_caps('owner ko bolo')}: Render > Environment me "
+                f"ADMIN_CHANNELS=Naam=@channel daalein.")
         return
     # Flow ke saare sawaal DM me poochhe jaate hain (jawab sirf private
     # message handler uthata hai). Group me /post chalane par bot har field
@@ -4569,8 +4620,11 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"@{context.bot.username} — then send /{POST_COMMAND} there.")
         return
     _post_flow.pop(update.effective_user.id, None)
+    # Admin ko sirf wahi types dikhte hain jo uske liye allowed hain
+    # (Upload = anime/movie). Owner ko sab.
+    types = _post_types_for(uid)
     kb = InlineKeyboardMarkup(
-        [[_btn(t, callback_data=f"posttype:{t}", style="primary")] for t in POST_TYPES])
+        [[_btn(t, callback_data=f"posttype:{t}", style="primary")] for t in types])
     await update.effective_message.reply_text(
         f"{fonts.bold('What are you posting?')}", reply_markup=kb)
 
