@@ -208,7 +208,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-26 · mahiru-persona-31"
+BOT_BUILD = "2026-11-26 · mahiru-persona-32"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1758,7 +1758,9 @@ _COMMANDS = [
 
 
 # Menu me kaun-kaun dikhega (handlers sabhi kaam karte rahenge).
-_MEMBER_MENU = ["start", "help", "ai", "rules", "report", "privacy"]
+# MENU MINIMAL: rules / report / privacy menu me NAHI — wo /help ke buttons
+# hain. Commands type karne par ab bhi chalti hain.
+_MEMBER_MENU = ["start", "help", "ai"]
 # ADMIN ko sirf ye — posting + halki moderation. Owner wali koi cheez nahi.
 _ADMIN_MENU = ["POSTCMD", "posts", "del", "pin", "kick", "unkick"]
 
