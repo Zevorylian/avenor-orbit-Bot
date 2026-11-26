@@ -208,7 +208,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-26 · mahiru-persona-29"
+BOT_BUILD = "2026-11-26 · mahiru-persona-30"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -2906,6 +2906,25 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("PRIVACY: user %s ne apna data delete kiya (%s)", user.id, res)
         return
 
+    if data.split(":", 1)[0] in ("mtn", "lck", "asp", "gat"):
+        # ON/OFF buttons — "on" type karne ki zaroorat nahi.
+        if not is_owner(user.id):
+            await q.answer()
+            return
+        _key, _val = data.split(":", 1)
+        _fn = {"mtn": cmd_maintenance, "lck": cmd_lock,
+               "asp": cmd_antispam, "gat": cmd_gate}[_key]
+        await q.answer()
+        _old_args = context.args
+        try:
+            context.args = [_val]
+            await _fn(update, context)
+        except Exception as e:
+            log.warning("toggle %s fail: %s", data, e)
+        finally:
+            context.args = _old_args
+        return
+
     if data.startswith("jreq:"):
         # Join request ke 3 buttons — sirf admin/owner chala sakte hain.
         if not is_privileged(user.id):
@@ -2960,8 +2979,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         act = data.split(":", 1)[1]
         await q.answer()
         if act == "post":
-            _post_scope[user.id] = "admin"     # anime channels wala flow
-            await cmd_post(update, context)
+            # Scope seedha pass hota hai — shared dict me kuch chhoda nahi jata.
+            await _start_post(update, context, scope="admin")
         elif act == "posts":
             await cmd_posts(update, context)
         return
@@ -4940,13 +4959,24 @@ async def _post_channel_kb(chat_id, context, uid, edit_msg=None):
 
 
 async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Post builder — sirf Owner/Admin."""
+    """`/post` — OWNER ka poora builder (apne 2 channels ke liye)."""
+    return await _start_post(update, context, scope=None)
+
+
+async def _start_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                      scope=None):
+    """Post flow ka ek hi entry point.
+
+    ZAROORI (bug fix): pehle `/post` purane `_post_scope` ko padh leta tha.
+    Ek baar /admin panel se 📝 Post dabaya, to owner ka agla `/post` bhi
+    anime wala flow dikhane lagta tha. Ab scope SIRF yahan se set hota hai —
+    koi purana state padha nahi jata.
+    """
     if not is_privileged(update.effective_user.id):
         return
     uid = update.effective_user.id
-    # Admin (aur /admin panel) = LINK FLOW: sirf Anime/Movie -> Link -> bot ka
-    # link. Koi banner, koi naam, koi channel, koi post NAHI.
-    _scope = "admin" if not is_owner(uid) else _post_scope.pop(uid, None)
+    # Admin ke liye hamesha link flow; owner ke liye sirf jab panel se aaya ho.
+    _scope = "admin" if (not is_owner(uid) or scope == "admin") else None
     if _scope != "admin":
         _ch = _channels_for(uid, _scope)
         if not _ch:
@@ -5577,9 +5607,9 @@ async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out += [f"{sc('the gate is off - no channel has to be joined')}", "",
                     f"{sc('add')}: /gate add @channel Naam"]
         else:
-            out += ["", f"{sc('add')}: /gate add @channel Naam",
-                    f"{sc('off')}: /gate off"]
-        await _send_long(msg, "\n".join(out))
+            out += ["", f"{sc('add')}: /gate add @channel Naam"]
+        await msg.reply_text("\n".join(out),
+                             reply_markup=_onoff_kb("gat", bool(blocks)))
         return
 
     if op in ("on", "off"):
@@ -5904,9 +5934,10 @@ async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("This works only inside a group.")
         return
     if not (context.args or []):
+        _on = db_lock_get(update.effective_chat.id)
         await update.effective_message.reply_text(
-            f"{sc('lock')} : {bd('ON' if db_lock_get(update.effective_chat.id) else 'OFF')}"
-            f"\n\n/lock   |   /unlock")
+            f"{sc('lock')} : {bd('ON' if _on else 'OFF')}",
+            reply_markup=_onoff_kb("lck", _on))
         return
     try:
         await context.bot.set_chat_permissions(
@@ -5941,6 +5972,16 @@ async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"{bd('failed')} — {_err_hint(e)}")
 
 
+def _onoff_kb(prefix, on_now=None) -> InlineKeyboardMarkup:
+    """[ON] [OFF] buttons — 'on' type karne ki zaroorat nahi."""
+    return InlineKeyboardMarkup([[
+        _btn("ON", callback_data=f"{prefix}:on",
+             style="success" if on_now else "primary"),
+        _btn("OFF", callback_data=f"{prefix}:off",
+             style="primary" if on_now else "danger"),
+    ]])
+
+
 async def cmd_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """OWNER: poora AI band / chalu — sirf owner commands chalte rahenge."""
     if not await _need_owner(update):
@@ -5948,9 +5989,10 @@ async def cmd_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sc, bd = fonts.small_caps, fonts.bold
     args = context.args or []
     if not args:
+        _on = db_maintenance_get()
         await update.effective_message.reply_text(
-            f"{sc('maintenance')} : {bd('ON' if db_maintenance_get() else 'OFF')}\n\n"
-            f"/maintenance on   |   /maintenance off")
+            f"{sc('maintenance')} : {bd('ON' if _on else 'OFF')}",
+            reply_markup=_onoff_kb("mtn", _on))
         return
     on = str(args[0]).lower() in ("on", "1", "yes", "true")
     db_maintenance(on)
@@ -6051,10 +6093,10 @@ async def cmd_antispam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     args = context.args or []
     if not args:
-        on = db_antispam_get(update.effective_chat.id)
+        _on = db_antispam_get(update.effective_chat.id)
         await update.effective_message.reply_text(
-            f"{sc('antispam')} : {bd('ON' if on else 'OFF')}\n\n"
-            f"/antispam on   |   /antispam off")
+            f"{sc('antispam')} : {bd('ON' if _on else 'OFF')}",
+            reply_markup=_onoff_kb("asp", _on))
         return
     on = str(args[0]).lower() in ("on", "1", "yes", "true")
     db_antispam_set(update.effective_chat.id, on)
