@@ -208,7 +208,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-26 · mahiru-persona-30"
+BOT_BUILD = "2026-11-26 · mahiru-persona-31"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1859,42 +1859,86 @@ async def cmd_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text, reply_markup=_owner_panel_kb())
 
 
+def _help_kb() -> InlineKeyboardMarkup:
+    """Rules | Report  (half-half), neeche Privacy (full)."""
+    return InlineKeyboardMarkup([
+        [_btn("📜 Rules", callback_data="help:rules", style="primary"),
+         _btn("🚩 Report", callback_data="help:report", style="primary")],
+        [_btn("🔒 Privacy", callback_data="help:privacy", style="primary")],
+    ])
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Role ke hisaab se commands — FLAT list, koi tier label nahi.
-    Isse member/admin ko pata nahi chalta ki unke paas kam commands hain;
-    unki list poori lagti hai. Owner ko sab dikhta hai (★ = sirf owner)."""
+    """Help — har role ke liye ALAG. Member ko sirf apni, admin ko apni,
+    owner ko poori. Sab ek hi list me thoos kar nahi bhejte."""
     uid = update.effective_user.id
     sc, bd = fonts.small_caps, fonts.bold
     sep = "━━━━━━━━━━━━━━━━━"
-    lvl = 2 if is_owner(uid) else (1 if is_admin(uid) else 0)
-    rank = {"member": 0, "admin": 1, "owner": 2, "hidden": 99}
-    out = [bd("COMMANDS"), "",
-           f"{sc('tap a command, or just write to me')}", ""]
-    last_rank = None
-    for c, d, r in _COMMANDS:
-        if r == "hidden" or rank[r] > lvl:
-            continue
-        # Ek se zyada group dikh rahe hain to unke beech ek khaali line —
-        # padhne me aasan. Member ko sirf ek group dikhta hai, to flat.
-        if last_rank is not None and rank[r] != last_rank:
-            out.append("")
-        last_rank = rank[r]
-        name = POST_COMMAND if c == "POSTCMD" else c
-        star = "★ " if (lvl == 2 and rank[r] == 2) else ""
-        out.append(f"{star}/{name} — {d}")
-    _uname = ("@" + context.bot.username) if getattr(context.bot, "username", None) else BOT_USERNAME
-    out += ["", sep]
-    if lvl >= 1:
-        out.append(f"{sc('needs a user id')} :  /kick 12345678   {sc('or reply with')} /kick")
-    out += [f"{sc('needs text')}     :  /ai your question",
-            f"{sc('dm')}            :  just write to me",
-            f"{sc('in a group')}    :  mention {_uname}",
-            sep]
-    if lvl >= 1:
-        out.append(f"{sc('group commands need the bot to be an admin')}")
-    if lvl == 2:
-        out.append(f"{sc('★ = owner only')}")
-    await _send_long(update.effective_message, "\n".join(out).strip())
+
+    if is_owner(uid):
+        out = [f"{bd('HELP')} · {bd('OWNER')}", "",
+               f"{sc('you run everything')}", sep,
+               bd("PANEL"),
+               "  /owner — the whole panel in one place",
+               "  /admin — post and admin tools", "",
+               bd("COMMUNITY"),
+               "  /chats — chats the bot is in",
+               "  /sync — re-check them now",
+               "  /audience — who is where",
+               "  /links — saved links",
+               "  /gate — which channels must be joined",
+               "  /export — back up every post link", "",
+               bd("POSTS"),
+               "  /post — build a post (your 2 channels)",
+               "  /posts — posts you made",
+               "  /autopost — daily auto-post", "",
+               bd("MODERATION"),
+               "  /mute /unmute — stop someone talking",
+               "  /warn /unwarn /warns — warnings (3 = removed)",
+               "  /purge — delete from a reply onward",
+               "  /lock /unlock — freeze the group",
+               "  /antispam — auto-delete link spam",
+               "  /pin /unpin /del — message tools",
+               "  /ban /unban — bot access",
+               "  /settitle /invitelink /promote — group tools", "",
+               bd("GROWTH"),
+               "  /stats /top /members /ref",
+               "  /broadcast — message every user", "",
+               bd("SYSTEM"),
+               "  /diag /mongo /backup /maintenance",
+               "  /user — full card for one person",
+               "  /audit /perms /getid /setid /btnstyle /claim", "",
+               f"{sc('member commands')}: /start /ai /rules /report /privacy"]
+    elif is_admin(uid):
+        out = [f"{bd('HELP')} · {bd('ADMIN')}", "",
+               f"{sc('your job: turn an anime or movie link into a share link')}",
+               sep,
+               bd("YOUR PANEL"),
+               "  /admin — open it (Post · Posts)", "",
+               bd("MAKE A LINK"),
+               "  /post — pick Anime or Movie, send the link,",
+               "          and you get a share link back",
+               "  /posts — links you already made", "",
+               bd("IN A GROUP"),
+               "  reply to a message, then:",
+               "  /del — delete it",
+               "  /pin — pin it",
+               "  /kick — remove the sender",
+               "  /unkick — let them back in", "",
+               f"{sc('you do not post into any channel yourself')}"]
+    else:
+        out = [f"{bd('HELP')}", "",
+               f"{sc('I am Mahiru - talk to me like a person')}", sep,
+               bd("TALK"),
+               "  just write to me — anything, in any language",
+               "  /ai — ask me a question directly", "",
+               bd("HERE"),
+               "  /start — say hello again",
+               "  /help — this list", "",
+               bd("THE REST"),
+               "  use the buttons below"]
+    await _send_long(update.effective_message, "\n".join(out),
+                     reply_markup=_help_kb())
 
 
 async def cmd_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2250,14 +2294,19 @@ def _split_text(text, limit) -> list:
     return out or [""]
 
 
-async def _send_long(message, text, limit=3800):
+async def _send_long(message, text, limit=3800, reply_markup=None):
     """Telegram ki 4096 limit — lamba text tukdon me bhejo, warna error aata hai.
-    Har chunk _safe se jaata hai (429/403 par crash nahi)."""
+    Har chunk _safe se jaata hai (429/403 par crash nahi).
+
+    reply_markup sirf aakhri chunk par lagta hai (ek hi keyboard, neeche)."""
     if len(text) <= limit:
-        await _safe(message.reply_text, text)
+        await _safe(message.reply_text, text, reply_markup=reply_markup)
         return
-    for chunk in _split_text(text, limit):
-        await _safe(message.reply_text, chunk)
+    chunks = _split_text(text, limit)
+    for i, chunk in enumerate(chunks):
+        last = i == len(chunks) - 1
+        await _safe(message.reply_text, chunk,
+                    reply_markup=reply_markup if last else None)
 
 
 # =====================================================================
@@ -2904,6 +2953,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Deletion ka record audit log me NAHI daalte — warna wahi user ka
         # data dobara likh jata. Sirf server log me.
         log.info("PRIVACY: user %s ne apna data delete kiya (%s)", user.id, res)
+        return
+
+    if data.startswith("help:"):
+        # /help ke 3 buttons — Rules | Report | Privacy.
+        which = data.split(":", 1)[1]
+        _fn = {"rules": cmd_rules, "report": cmd_report,
+               "privacy": cmd_privacy}.get(which)
+        await q.answer()
+        if _fn is not None:
+            await _fn(update, context)
         return
 
     if data.split(":", 1)[0] in ("mtn", "lck", "asp", "gat"):
