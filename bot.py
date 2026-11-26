@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-25 · mahiru-persona-25"
+BOT_BUILD = "2026-11-26 · mahiru-persona-26"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -1239,7 +1239,7 @@ async def needs_join(context, user_id, force=False) -> bool:
         return len(joined) < need
     # Kuch bhi verify nahi ho paya (chat id nahi / bot admin nahi).
     # Gate ko CHHUPAO MAT — pehle ye ek hi baar dikhta tha, isliye
-    # "Joined / Verify" button ek baar dikh kar hamesha gayab ho jata tha.
+    # "Verify" button ek baar dikh kar hamesha gayab ho jata tha.
     # Ab har baar dikhta hai. (Verify fail-closed hai — link tab tak nahi milega.)
     return True
 
@@ -1664,7 +1664,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Owner/admin ko verify ki zaroorat NAHI — unke liye seedha. Sirf links
     # reference ke liye, Verify button nahi.
     # Owner ke liye kuch nahi (na channels, na Verify) — seedha welcome.
-    # Admin aur member dono ko wahi 5 links + Joined / Verify milte hain.
+    # Admin aur member dono ko wahi links + Verify milte hain.
     head = (f"{fonts.bold('Welcome, ' + (user.first_name or 'friend'))}\n\n"
             f"I am {fonts.bold(BOT_BRAND)}. Say hi — or just tell me what is "
             f"on your mind.")
@@ -2799,7 +2799,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 update.effective_chat.id,
                 f"{fonts.bold(name)}\n{blk['url']}\n\n"
-                f"{fonts.small_caps('come back here and tap Joined / Verify')}")
+                f"{fonts.small_caps('wapas aa kar Verify dabao')}")
         except Exception:
             pass
         return
@@ -2911,8 +2911,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await _safe(
                 context.bot.send_message, update.effective_chat.id,
-                f"{fonts.bold('Link bhejo')}\n"
-                f"{fonts.small_caps('bas link — koi banner, koi naam nahi')}")
+                f"{fonts.bold('Link bhejo')}")
             return
         if not _channels_for(user.id, _sc):
             await q.answer("Koi channel set nahi hai", show_alert=True)
@@ -4341,13 +4340,12 @@ async def cmd_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         return await cmd_admin(update, context)
     sc, bd = fonts.small_caps, fonts.bold
-    ch = _channels_for(uid, scope="admin")
-    names = [n for row in ch for n, _c in row] or [sc("koi channel set nahi")]
+    # Chhota aur saaf. "post kahan ja sakta hai / koi channel set nahi" wala
+    # block hata diya — admin channel me post karta hi nahi, sirf link banata hai.
     text = (f"{bd('ADMIN PANEL')}\n\n"
-            f"{sc('post kahan ja sakta hai')}:\n"
-            + "\n".join(f"  • {n}" for n in names)
-            + f"\n\n{sc('group me')}: /del  /pin  /kick  /unkick  "
-              f"({sc('message par reply karke')})")
+            f"📝 {sc('Post')} — anime ya movie ka link banao\n"
+            f"📄 {sc('Posts')} — banaye hue links\n\n"
+            f"{sc('group me reply karke')}: /del  /pin  /kick  /unkick")
     await update.effective_message.reply_text(text, reply_markup=_admin_panel_kb(uid))
 
 
@@ -4884,10 +4882,8 @@ async def _post_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         _post_flow.pop(uid, None)
         await update.effective_message.reply_text(
-            f"{fonts.bold('LINK READY')}\n\n"
             f"{_deep_link(context, code)}\n\n"
-            f"{fonts.small_caps('jisko dena ho use ye bhej do')} — "
-            f"{fonts.small_caps('gate ke baad asli link milega')}")
+            f"{fonts.small_caps('jisko dena ho, ye bhej do')}")
         return
 
     # --- banner image ka intezaar ---

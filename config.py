@@ -393,12 +393,13 @@ MIN_JOINS_REQUIRED = os.getenv("MIN_JOINS_REQUIRED", "all")
 
 # Force-join gate par jo message dikhta hai (links ke upar).
 GATE_MESSAGE = os.getenv("GATE_MESSAGE", (
-    "ʜᴇʟʟᴏ ᴛʜᴇʀᴇ..!⚡️\n\n"
-    "🫧ᴘʟᴇᴀsᴇ ᴊᴏɪɴ ᴏғ ᴏᴜʀ ᴄʜᴀɴɴᴇʟs ғɪʀsᴛ ᴛʜᴇɴ ᴄʟɪᴄᴋ ᴏɴ ᴄʜᴇᴄᴋ...!"
+    "ʜᴇʏ..! ⚡️\n\n"
+    "ɴᴇᴇᴄʜᴇ ᴅɪʏᴇ ɢᴀʏᴇ ᴄʜᴀɴɴᴇʟs ᴊᴏɪɴ ᴋᴀʀᴏ,\n"
+    "ᴘʜɪʀ Verify ᴅᴀʙᴀᴏ."
 ))
 
 # Gate ke neeche wala button (join check karta hai).
-GATE_BUTTON_TEXT = os.getenv("GATE_BUTTON_TEXT", "Joined / Verify")
+GATE_BUTTON_TEXT = os.getenv("GATE_BUTTON_TEXT", "Verify")
 
 # Rules — members /rules se dekhte hain.
 RULES_TEXT = os.getenv("RULES_TEXT", (
@@ -947,7 +948,7 @@ JOIN_BUTTON_TEXT = os.getenv("JOIN_BUTTON_TEXT", "Request to Join")
 #   Ek hi row ke buttons saath aate hain. Chaho to badal lo.
 # ---- STRICT GATE CHANNELS (code me, permanent) ------------------------
 # Post ka deep link kholte hi user ko YAHI channels dikhte hain, aur
-# "Joined / Verify" dabane par har channel ki membership check hoti hai.
+# "Verify" dabane par har channel ki membership check hoti hai.
 # Saare join hone par hi asli link milta hai. (Ek bhi baaki = nahi milega.)
 #
 # "id" numeric ho to best (bot us channel me ADMIN hona chahiye).
