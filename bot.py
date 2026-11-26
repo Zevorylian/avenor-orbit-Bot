@@ -206,7 +206,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-26 · mahiru-persona-26"
+BOT_BUILD = "2026-11-26 · mahiru-persona-27"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -2844,6 +2844,45 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("PRIVACY: user %s ne apna data delete kiya (%s)", user.id, res)
         return
 
+    if data.startswith("jreq:"):
+        # Join request ke 3 buttons — sirf admin/owner chala sakte hain.
+        if not is_privileged(user.id):
+            await q.answer()
+            log.warning("jreq callback blocked for %s (%s)", user.id, data)
+            return
+        parts = data.split(":")
+        if len(parts) != 4:
+            await q.answer()
+            return
+        _act, _cid, _uid = parts[1], parts[2], parts[3]
+        try:
+            _cid, _uid = int(_cid), int(_uid)
+        except ValueError:
+            await q.answer("Bad request")
+            return
+        _base = (q.message.text or "") if q.message else ""
+        if _act == "p":
+            await q.answer("Pending — koi action nahi liya")
+            await _safe(q.edit_message_text,
+                        f"{_base}\n\n⏳ pending")
+            return
+        await q.answer("…")
+        try:
+            if _act == "a":
+                await context.bot.approve_chat_join_request(chat_id=_cid, user_id=_uid)
+                _mark = f"✅ approved — {user.full_name}"
+            else:
+                await context.bot.decline_chat_join_request(chat_id=_cid, user_id=_uid)
+                _mark = f"❌ rejected — {user.full_name}"
+            await _safe(q.edit_message_text, f"{_base}\n\n{_mark}",
+                        reply_markup=None)
+            log.info("Join request %s: %s by %s", _act, _uid, user.id)
+        except Exception as e:
+            await _safe(q.edit_message_text,
+                        f"{_base}\n\n⚠️ {_err_hint(e)}", reply_markup=None)
+            log.warning("Join request action fail (%s): %s", data, e)
+        return
+
     if data == "ownerpanel":
         if not is_owner(user.id):
             await q.answer()
@@ -3440,6 +3479,46 @@ async def _join_welcome_dm(context, req, chat) -> None:
         log.info("Join-request DM bheja: %s (%s)", usr.id, chat.id)
 
 
+def _is_admin_channel(chat_id) -> bool:
+    """Kya ye ADMIN_CHANNELS (5 anime private channels) me se hai?"""
+    k = _cid_key(_norm_chat_id(chat_id))
+    for _n, cid in ADMIN_CHANNELS:
+        if _cid_key(_norm_chat_id(cid)) == k:
+            return True
+    return False
+
+
+def _first_admin_id() -> int:
+    """Admin 1 — pehla admin (env ADMIN_IDS, phir DB admins)."""
+    ids = [int(a) for a in ADMIN_IDS] + [int(k) for k in db_admins()]
+    return ids[0] if ids else 0
+
+
+async def _notify_admin_join_request(context, chat, usr) -> None:
+    """Private anime channel ki join request -> Admin 1 ko DM + 3 buttons.
+
+    Owner ke apne channel (Avenor) ke liye ye nahi chalta — wahan pehle jaisa
+    auto-approve + welcome DM hi rehta hai.
+    """
+    target = _first_admin_id() or owner_id()
+    if not target:
+        log.warning("Join request aayi par koi admin/owner set nahi: %s", chat.id)
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    text = (f"{bd('JOIN REQUEST')}\n\n"
+            f"{sc('user')}    : {usr.full_name}\n"
+            f"{sc('id')}      : {usr.id}\n"
+            f"{sc('channel')} : {chat.title or chat.id}")
+    kb = InlineKeyboardMarkup([
+        [_btn("✅ Approve", callback_data=f"jreq:a:{chat.id}:{usr.id}", style="success"),
+         _btn("❌ Reject", callback_data=f"jreq:r:{chat.id}:{usr.id}", style="danger")],
+        [_btn("⏳ Pending", callback_data=f"jreq:p:{chat.id}:{usr.id}")],
+    ])
+    sent = await _safe(context.bot.send_message, target, text, reply_markup=kb)
+    if sent is not None:
+        log.info("Join request Admin %s ko bheji: %s (%s)", target, usr.id, chat.id)
+
+
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Join request aayi -> record, phir DM (agar on hai), phir approve.
 
@@ -3460,6 +3539,14 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if getattr(req, "invite_link", None) is not None:
         _src = str(getattr(req.invite_link, "name", "") or "invite")[:40]
     _note_audience(chat.id, usr, src=_src or "join_request", status="requested")
+
+    # 5 private anime channels: khud approve NAHI — Admin 1 ko DM jata hai
+    # (Approve / Reject / Pending). Requester ko welcome DM bhi nahi, kyunki
+    # wo abhi member hai hi nahi.
+    if _is_admin_channel(chat.id):
+        await _notify_admin_join_request(context, chat, usr)
+        return
+
     await _join_welcome_dm(context, req, chat)
     if not AUTO_APPROVE_JOIN:
         return
