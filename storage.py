@@ -360,7 +360,12 @@ def flush_local_now() -> bool:
     Async code se isse `asyncio.to_thread(...)` me hi bulana — warna event
     loop ruk jayega (wahi AV-02 galti).
     """
-    return db_write_json(db_load())
+    # Audit F-02: yahi race — live dict ko worker thread se json.dump karna.
+    # Snapshot lock ke andar lo. (Ye commit_now/close se asyncio.to_thread
+    # me bhi bulaya jata hai, isliye yahan bhi lock zaroori hai.)
+    with _db_lock:
+        snapshot = copy.deepcopy(db_load())
+    return db_write_json(snapshot)
 
 
 def pending_json_write() -> bool:
@@ -485,10 +490,15 @@ def _write_mirror() -> None:
     'fixed' likha hai — mirror wali jagah bachi hui thi).
     """
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    # Audit F-02: wahi race — live dict ko worker thread se dump karna. Pehle
+    # lock ke andar copy lo, phir dump karo (dump lock ke bahar, taaki disk
+    # I/O lock ko der tak na roke).
+    with _db_lock:
+        snapshot = copy.deepcopy(db_load())
     with _json_write_lock:
         tmp = DB_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(db_load(), f, ensure_ascii=False)
+            json.dump(snapshot, f, ensure_ascii=False)
         os.replace(tmp, DB_PATH)
 
 
@@ -639,7 +649,13 @@ def _snapshot_for_write():
     # deepcopy ZAROORI hai: db_load() live dict deta hai jise handlers usi
     # waqt badal rahe hote hain. Bina copy ke driver encode karte waqt
     # "dictionary changed size during iteration" aa sakta hai.
-    data = copy.deepcopy(db_load())
+    # Audit F-02: deepcopy LIVE dict par hota hai, aur event loop usi dict ko
+    # _db_lock ke andar mutate karta rehta hai. Lock ke bina deepcopy kabhi
+    # "dictionary changed size during iteration" de deta tha -> flush fail ->
+    # poora storage jhooth-moot DEGRADED + owner ko alert. Snapshot lock ke
+    # andar lo, taaki ek consistent copy bane.
+    with _db_lock:
+        data = copy.deepcopy(db_load())
     size = doc_size_bytes(data)
     notes = []
     if size > STORAGE_DOC_LIMIT_BYTES:
@@ -769,8 +785,17 @@ def user_present(uid) -> bool:
 
 
 async def doc_size_now() -> int:
-    """Abhi ka document size (bytes). /diag dikhata hai."""
-    return await asyncio.to_thread(doc_size_bytes, db_load())
+    """Abhi ka document size (bytes). /diag dikhata hai.
+
+    Audit F-02: BSON encode live dict par nahi — pehle lock ke andar
+    snapshot lo, phir thread me encode karo.
+    """
+    def _size() -> int:
+        with _db_lock:
+            snap = copy.deepcopy(db_load())
+        return doc_size_bytes(snap)
+
+    return await asyncio.to_thread(_size)
 
 
 async def close():
@@ -1672,7 +1697,7 @@ def delete_user_data(uid) -> dict:
     uid = int(uid)
     key = str(uid)
     out = {"user": False, "referrals": 0, "referred_by": 0, "banned": False,
-           "done": 0, "requests": 0, "audit": 0}
+           "done": 0, "requests": 0, "audit": 0, "audience": 0, "warns": 0}
     with _db_lock:
         d = db_load()
         users = d.setdefault("users", {})
@@ -1709,6 +1734,17 @@ def delete_user_data(uid) -> dict:
         requests_ = d.setdefault("requests", {})
         if requests_.pop(key, None) is not None:
             out["requests"] = 1
+
+        # Audit F-01: per-chat member ledger (audience) aur warnings bhi hatao.
+        # Pehle ye do stores chhoot jaate the, isliye user ko "your record is
+        # gone from the database" bolne ke baad bhi uska poora naam aur
+        # Telegram id audience ledger me pada rehta tha.
+        for per_chat in (d.get("audience") or {}).values():
+            if isinstance(per_chat, dict) and per_chat.pop(key, None) is not None:
+                out["audience"] += 1
+        for per_chat in (d.get("warns") or {}).values():
+            if isinstance(per_chat, dict) and per_chat.pop(key, None) is not None:
+                out["warns"] += 1
 
         journal = d.setdefault("audit", [])
         before = len(journal)

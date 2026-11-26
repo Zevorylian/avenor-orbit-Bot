@@ -158,6 +158,7 @@ from config import (
     AI_TOTAL_BUDGET,
     AI_MODELS,
     AI_MODEL_CYCLES,
+    AI_BOT_LINK,
     CHANNEL_LINK,
     INVITE_ENABLED,
     INVITE_MIN_TURNS,
@@ -208,7 +209,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-26 · mahiru-persona-32"
+BOT_BUILD = "2026-11-26 · mahiru-persona-33 · audit-fixes"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -624,12 +625,25 @@ def _is_duplicate_text(chat_id, uid, text) -> bool:
     return prev_body == body and (now - prev_ts) < MSG_DEDUPE_WINDOW
 
 
+def _ai_link() -> str:
+    """{ai_link} placeholder me jaane wala ASLI link.
+
+    Pehle yahan LINK_BLOCKS me "ai" naam ka block dhoondha jaata tha — aisa
+    block config me kabhi tha hi nahi, isliye user ko literally
+    "talk to the AI directly (AI)" dikhta tha (audit F-06).
+    """
+    blk = next((b for b in LINK_BLOCKS
+                if b["name"].strip().lower() in ("ai", "ai bot")), None)
+    if blk:
+        return blk["url"]
+    return AI_BOT_LINK or CHANNEL_LINK or "AI"
+
+
 def busy_message() -> str:
     """AI busy/down hone par user ko bhejne wala message."""
-    ai_block = next((b for b in LINK_BLOCKS if b["name"].strip().lower() == "ai"), None)
     if "{ai_link}" not in AI_BUSY_MESSAGE:
         return AI_BUSY_MESSAGE
-    return AI_BUSY_MESSAGE.replace("{ai_link}", ai_block["url"] if ai_block else "AI")
+    return AI_BUSY_MESSAGE.replace("{ai_link}", _ai_link())
 
 
 # =====================================================================
@@ -1123,10 +1137,9 @@ AI_BUDGET_MESSAGE = (
 
 
 def budget_message() -> str:
-    ai_block = next((b for b in LINK_BLOCKS if b["name"].strip().lower() == "ai"), None)
     if "{ai_link}" not in AI_BUDGET_MESSAGE:
         return AI_BUDGET_MESSAGE
-    return AI_BUDGET_MESSAGE.replace("{ai_link}", ai_block["url"] if ai_block else "AI")
+    return AI_BUDGET_MESSAGE.replace("{ai_link}", _ai_link())
 
 
 # bot ka apna info — har group message par get_me() API call na ho (speed)
@@ -1316,19 +1329,25 @@ def _post_only_chats() -> set:
 
 
 def _post_only_username(chat) -> bool:
-    """Kya ye chat POST_CHANNELS me username se hai (LINK_BLOCKS me nahi)?"""
+    """Kya ye chat POST_CHANNELS me username se hai (LINK_BLOCKS me nahi)?
+
+    Audit F-05: dono taraf case ko lowercase karo. Pehle candidate lowercase
+    hota tha par block ids case-preserving the, isliye owner ke apne channel
+    ("@AvenorAppsAI") "post-only target" maan liye jaate the — learn_chat
+    skip ho jata tha aur /chats me nahi dikhte the.
+    """
     uname = str(getattr(chat, "username", "") or "").strip().lower()
     if not uname:
         return False
-    block_ids = {_cid_key(b.get("id")) for b in LINK_BLOCKS if b.get("id")}
+    block_ids = {_cid_key(b.get("id")).lower() for b in LINK_BLOCKS if b.get("id")}
     for row in POST_CHANNELS:
         for _name, cid in row:
             c = str(cid).strip().lower().lstrip("@")
-            if c == uname and _cid_key("@" + c) not in block_ids:
+            if c == uname and _cid_key("@" + c).lower() not in block_ids:
                 return True
     for _name, cid in ADMIN_CHANNELS:
         c = str(cid).strip().lower().lstrip("@")
-        if c == uname and _cid_key("@" + c) not in block_ids:
+        if c == uname and _cid_key("@" + c).lower() not in block_ids:
             return True
     return False
 
@@ -2946,7 +2965,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Account record : {'removed' if res['user'] else 'nothing was stored'}\n"
                 f"Invite count   : {res['referrals']} removed\n"
                 f"Referral links : {res['referred_by']} cleaned\n"
-                f"Conversation   : {res['memory']} memory key(s) cleared\n\n"
+                f"Conversation   : {res['memory']} memory key(s) cleared\n"
+                f"Group ledger   : {res.get('audience', 0)} chat(s) cleaned\n"
+                f"Warnings       : {res.get('warns', 0)} cleared\n\n"
                 f"{state_line}\n\n"
                 "You can keep using the bot; a new record starts only if you "
                 "send /start again.")
@@ -3082,6 +3103,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log.warning("Post type blocked: %s tried %r", user.id, t)
             return
         if _sc == "admin":
+            # Telegram har callback ka jawab maangta hai — warna button par
+            # spinner chalta rehta hai. Is branch me q.answer() hi nahi tha
+            # (audit F-08).
+            await q.answer()
             # LINK FLOW — seedha link maango, koi channel/poster nahi.
             _post_flow[user.id] = {"type": t, "mode": "link", "step": 0,
                                    "data": {}, "channels": [],
@@ -3290,11 +3315,20 @@ def _pack_ask(q: str) -> str:
     Telegram ka deep link sirf `start` payload leta hai (max ~64 char),
     isliye sawaal ko base64 karke bhejte hain: start=ask_<b64>.
     """
-    raw = str(q or "").strip()[:60]
+    raw = str(q or "").strip()
     if not raw:
         return ""
+    # Audit F-07: Telegram ka start payload 64 chars ka hai — "ask_" (4) +
+    # base64 (4 chars = 3 bytes) => zyada se zyada 45 bytes. Pehle
+    # `("ask_" + b)[:64]` base64 ko beech se kaat deta tha, isliye lamba
+    # sawaal CHUP-CHAAP adhoora pahunchta tha. Ab jaan-boojh kar faisla:
+    # poora sawaal fit hote ho to bhejo, warna khaali string — adhoora
+    # sawaal bhejne se behtar hai inline card dikhe hi na.
+    if len(raw.encode("utf-8")) > 45:
+        return ""
     b = base64.urlsafe_b64encode(raw.encode("utf-8")).decode().rstrip("=")
-    return ("ask_" + b)[:64]
+    payload = "ask_" + b
+    return payload if len(payload) <= 64 else ""
 
 
 def _unpack_ask(arg: str) -> str:
@@ -3340,11 +3374,15 @@ def _inline_results(context, query: str) -> list:
     if q:
         # Query ko base64 karke bot tak le jao — DM khulega aur jawab turant
         # aayega. Isse inline mode "ad" nahi, kaam ki cheez ban jata hai.
-        out.append(_art(
-            "ask", f"ask Mahiru: {q[:40]}",
-            "sends this question to her in private",
-            f"ask her: {q[:120]}",
-            f"https://t.me/{bot_name}?start={_pack_ask(q)}", "ask her"))
+        # Sawaal payload me fit nahi baithta to card dikhao hi nahi — warna
+        # user ko lagta hai poora sawaal gaya, jabki aadha jaata hai (F-07).
+        _payload = _pack_ask(q)
+        if _payload:
+            out.append(_art(
+                "ask", f"ask Mahiru: {q[:40]}",
+                "sends this question to her in private",
+                f"ask her: {q[:120]}",
+                f"https://t.me/{bot_name}?start={_payload}", "ask her"))
     return out
 
 
@@ -4372,6 +4410,12 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await context.bot.ban_chat_member(update.effective_chat.id, uid)
+        # KICK = ban + turant unban. Pehle sirf ban hota tha, isliye "kick"
+        # kiya hua user invite link se wapas nahi aa sakta tha jab tak
+        # /unkick na chale — jabki help text "let them back in" kehta hai
+        # (audit F-09).
+        await context.bot.unban_chat_member(update.effective_chat.id, uid,
+                                            only_if_banned=True)
         # Journal: kaun, kya, kisko, kahan (appeal / galti sudhaarne ke liye).
         audit_add(update.effective_user.id, "kick", uid, update.effective_chat.id)
         await update.effective_message.reply_text(f"Kicked: {uid}")
@@ -5779,6 +5823,7 @@ async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       if "community" in str(b.get("name", "")).lower()), "")
     text = (text.replace("{cache_days}", str(CACHE_RETENTION_DAYS))
                 .replace("{community}", community)
+                .replace("{privacy_url}", PRIVACY_URL or "")
                 .replace("{bot}", BOT_USERNAME))
     if PRIVACY_URL:
         text += f"\n\nFull policy: {PRIVACY_URL}"
@@ -6423,6 +6468,15 @@ def run_webhook(app: Application):
         failed = False
         async with _sem:
             async with _lock_for(_update_key(update)):
+                # Dedupe ko lock ke ANDAR dobara check karo (audit F-03).
+                # Upar wala check race hai: do overlapping deliveries
+                # (Telegram ka retry jab pehla response late ho) dono
+                # "not seen" dekh kar dono process_update chala deti thi —
+                # matlab /broadcast do baar, duplicate post.
+                if update_seen(update.update_id):
+                    log.info("Duplicate update %s (in-lock) — skip.",
+                             update.update_id)
+                    return Response(status_code=200)
                 try:
                     await app.process_update(update)
                 except Exception:

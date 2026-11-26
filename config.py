@@ -819,7 +819,8 @@ def thinking_level_for(model: str) -> str:
     return "low" if "low" in allowed else ""
 
 # Jab AI jawab na de paaye (server load/down) to user ko ye message jaata hai.
-# {ai_link} ki jagah "AI" block ka link khud lag jaata hai.
+# {ai_link} ki jagah bot.py ka _ai_link() asli link lagata hai (AI_BOT_LINK,
+# warna CHANNEL_LINK) — pehle yahan "AI" jaisa literal text chhap jata tha.
 AI_BUSY_MESSAGE = os.getenv("AI_BUSY_MESSAGE", (
     "My server is busy right now, so I could not answer.\n\n"
     "Please try again in a little while — or talk to the AI directly ({ai_link})."
@@ -848,7 +849,7 @@ USER_RETENTION_DAYS = _int_env("USER_RETENTION_DAYS", 0)
 DEFAULT_PRIVACY_TEXT = (
     "PRIVACY\n\n"
     "What is stored\n"
-    "- Your Telegram user id, first name, username (if any), and when you "
+    "- Your Telegram user id, your name, username (if any), and when you "
     "first started the bot.\n"
     "- Your invite count, and which user came through your link.\n"
     "- Group / channel ids the bot is in, so it can verify membership.\n"
