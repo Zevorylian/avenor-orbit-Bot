@@ -99,13 +99,13 @@ def _clean_host(h: str) -> str:
 def _host_looks_wrong(h: str) -> str:
     """Host ki saaf-saaf galti batao (khali string = theek hai)."""
     if not h:
-        return "MONGO_HOST khali hai"
+        return "MONGO_HOST is empty"
     if "xxx" in h.lower():
-        return "host me placeholder (xxx) pada hai — asli host daalo"
+        return "the host still has a placeholder (xxx) - put the real host in"
     if not h.endswith(".mongodb.net"):
-        return "host '.mongodb.net' par khatam hona chahiye"
+        return "the host must end with '.mongodb.net'"
     if h.count(".") < 2:
-        return "host adhoora lagta hai (jaise cluster0.abc123.mongodb.net)"
+        return "the host looks incomplete (e.g. cluster0.abc123.mongodb.net)"
     return ""
 
 
@@ -394,8 +394,8 @@ MIN_JOINS_REQUIRED = os.getenv("MIN_JOINS_REQUIRED", "all")
 # Force-join gate par jo message dikhta hai (links ke upar).
 GATE_MESSAGE = os.getenv("GATE_MESSAGE", (
     "ʜᴇʏ..! ⚡️\n\n"
-    "ɴᴇᴇᴄʜᴇ ᴅɪʏᴇ ɢᴀʏᴇ ᴄʜᴀɴɴᴇʟs ᴊᴏɪɴ ᴋᴀʀᴏ,\n"
-    "ᴘʜɪʀ Verify ᴅᴀʙᴀᴏ."
+    "ᴊᴏɪɴ ᴛʜᴇ ᴄʜᴀɴɴᴇʟs ʙᴇʟᴏᴡ,\n"
+    "ᴛʜᴇɴ ᴛᴀᴘ ᴠᴇʀɪꜰʏ."
 ))
 
 # Gate ke neeche wala button (join check karta hai).

@@ -237,7 +237,8 @@ def db_default() -> dict:
             "stats": {"total_started": 0}, "chat_ids": {}, "chats": {},
             "requests": {}, "done": {}, "posts": {}, "links": {},
             "audit": [], "ai_usage": {}, "growth": {}, "audience": {},
-            "autopost": {}, "admins": {}, "post_ids": {}, "owner": 0, "owner_name": "",
+            "autopost": {}, "admins": {}, "post_ids": {}, "owner": 0, "owner_name": "", "maintenance": False,
+            "warns": {}, "locks": {}, "antispam": {},
             "gate": {"on": False, "blocks": []}, "gate_links": {}}
 
 
@@ -1024,6 +1025,12 @@ def db_ref_count(uid):
         return ref["count"] if ref else 0
 
 
+def db_ref_all() -> dict:
+    """Saare referral records: {referrer_id: {"count": n, ...}}."""
+    with _db_lock:
+        return dict(db_load().get("referrals") or {})
+
+
 def db_ref_rank(uid):
     with _db_lock:
         refs = db_load()["referrals"]
@@ -1126,6 +1133,71 @@ def db_owner_set(uid) -> None:
         d = db_load()
         d["owner"] = int(uid)
         db_save(d)
+
+
+def db_maintenance(on=True) -> None:
+    with _db_lock:
+        d = db_load()
+        d["maintenance"] = bool(on)
+        db_save(d)
+
+
+def db_maintenance_get() -> bool:
+    with _db_lock:
+        return bool(db_load().get("maintenance"))
+
+
+def db_warn_add(chat_id, uid) -> int:
+    with _db_lock:
+        d = db_load()
+        w = d.setdefault("warns", {}).setdefault(str(chat_id), {})
+        w[str(int(uid))] = int(w.get(str(int(uid)), 0)) + 1
+        n = w[str(int(uid))]
+        db_save(d)
+        return n
+
+
+def db_warn_get(chat_id, uid) -> int:
+    with _db_lock:
+        w = (db_load().get("warns") or {}).get(str(chat_id)) or {}
+        return int(w.get(str(int(uid)), 0))
+
+
+def db_warn_clear(chat_id, uid) -> None:
+    with _db_lock:
+        d = db_load()
+        w = d.setdefault("warns", {}).setdefault(str(chat_id), {})
+        w.pop(str(int(uid)), None)
+        db_save(d)
+
+
+def db_warns_all(chat_id) -> dict:
+    with _db_lock:
+        return dict(((db_load().get("warns") or {}).get(str(chat_id)) or {}))
+
+
+def db_lock_set(chat_id, on=True) -> None:
+    with _db_lock:
+        d = db_load()
+        d.setdefault("locks", {})[str(chat_id)] = bool(on)
+        db_save(d)
+
+
+def db_lock_get(chat_id) -> bool:
+    with _db_lock:
+        return bool((db_load().get("locks") or {}).get(str(chat_id)))
+
+
+def db_antispam_set(chat_id, on=True) -> None:
+    with _db_lock:
+        d = db_load()
+        d.setdefault("antispam", {})[str(chat_id)] = bool(on)
+        db_save(d)
+
+
+def db_antispam_get(chat_id) -> bool:
+    with _db_lock:
+        return bool((db_load().get("antispam") or {}).get(str(chat_id)))
 
 
 def db_owner_name_set(name) -> None:

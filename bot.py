@@ -41,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 
 import telegram
 from telegram import (
+    ChatPermissions,
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -84,6 +85,7 @@ from google.genai import types
 
 import fonts
 import roster
+import storage
 from config import (
     BOT_TOKEN,
     BOT_USERNAME,
@@ -206,7 +208,7 @@ log = logging.getLogger("bot")
 
 # Build stamp — /diag aur startup log me dikhta hai, taaki pata chale ki
 # server par kaunsa code chal raha hai (purana build hone par turant dikhe).
-BOT_BUILD = "2026-11-26 · mahiru-persona-27"
+BOT_BUILD = "2026-11-26 · mahiru-persona-29"
 
 NOT_MEMBER_STATUSES = {ChatMember.LEFT, ChatMember.BANNED}
 
@@ -249,6 +251,17 @@ from storage import (
     db_owner_set,
     db_owner_name,
     db_owner_name_set,
+    db_maintenance,
+    db_maintenance_get,
+    db_warn_add,
+    db_warn_get,
+    db_warn_clear,
+    db_warns_all,
+    db_ref_all,
+    db_lock_set,
+    db_lock_get,
+    db_antispam_set,
+    db_antispam_get,
     db_admin_add,
     db_admin_del,
     db_post_id_set,
@@ -1595,6 +1608,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if db_is_banned(user.id):
         await update.effective_message.reply_text("You have been blocked from using this bot.")
         return
+    # Maintenance: AI band, sirf owner ke commands chalte hain.
+    if db_maintenance_get() and not is_owner(user.id):
+        await _safe(update.effective_message.reply_text,
+                    "The bot is under maintenance right now. Please try again later.")
+        return
 
     if update.effective_chat.type != ChatType.PRIVATE:
         await update.effective_message.reply_text(
@@ -1665,18 +1683,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # reference ke liye, Verify button nahi.
     # Owner ke liye kuch nahi (na channels, na Verify) — seedha welcome.
     # Admin aur member dono ko wahi links + Verify milte hain.
+    # Welcome — bas ek saaf message. Koi channel button nahi, koi Verify
+    # button nahi (owner ne kaha: ye dono hata do). Channel ke naam bas
+    # message me aate hain; link Mahiru zaroorat par khud share karti hai.
     head = (f"{fonts.bold('Welcome, ' + (user.first_name or 'friend'))}\n\n"
             f"I am {fonts.bold(BOT_BRAND)}. Say hi — or just tell me what is "
             f"on your mind.")
-    if is_owner(user.id):
-        await update.effective_message.reply_text(head)
-        return
-    await update.effective_message.reply_text(
-        head + f"\n\n{fonts.small_caps('our channels')}:",
-        reply_markup=link_keyboard(extra_rows=(
-            [[_btn(GATE_BUTTON_TEXT, callback_data="check_join", style="success")]]
-            if has_required_blocks() else [])),
-    )
+    # Channel ke naam yahan NAHI likhte — Mahiru khud zaroorat par batati hai
+    # (invite timing system). Welcome bas welcome hai.
+    await update.effective_message.reply_text(head)
 
 
 # (command, short description, min role)   role: member | admin | owner
@@ -1716,6 +1731,20 @@ _COMMANDS = [
     ("claim",     "first-run owner setup",               "hidden"),
     ("gate",      "force-join channels (strict)",        "owner"),
     ("export",    "backup every post link",              "owner"),
+    ("maintenance", "pause or resume the AI",            "owner"),
+    ("user",      "full card for one user",              "owner"),
+    ("top",       "top referrers",                       "owner"),
+    ("backup",    "send the database file",              "owner"),
+    ("mute",      "stop a member from talking",          "owner"),
+    ("unmute",    "let a member talk again",             "owner"),
+    ("warn",      "warn a member (3 = removed)",         "owner"),
+    ("unwarn",    "clear someone's warnings",            "owner"),
+    ("warns",     "who has warnings here",               "owner"),
+    ("purge",     "delete messages from a reply",        "owner"),
+    ("lock",      "freeze the group",                    "owner"),
+    ("unlock",    "unfreeze the group",                  "owner"),
+    ("antispam",  "auto-delete link spam",               "owner"),
+    ("unpin",     "unpin a message",                     "owner"),
     ("perms",     "the bot's permissions here",        "owner"),
     ("getid",     "get a chat's numeric ID",           "owner"),
     ("setid",     "bind a block to a chat ID",         "owner"),
@@ -1746,14 +1775,23 @@ def _owner_actions() -> dict:
         "setid": cmd_setid, "ban": cmd_ban, "unban": cmd_unban,
         "members": cmd_members, "autopost": cmd_autopost,
         "admin": cmd_admin, "gate": cmd_gate, "export": cmd_export,
+        "maintenance": cmd_maintenance, "user": cmd_user, "top": cmd_top,
+        "backup": cmd_backup, "mute": cmd_mute, "unmute": cmd_unmute,
+        "warn": cmd_warn, "unwarn": cmd_unwarn, "warns": cmd_warns,
+        "purge": cmd_purge, "lock": cmd_lock, "unlock": cmd_unlock,
+        "antispam": cmd_antispam, "unpin": cmd_unpin,
     }
 
 
 def _owner_panel_kb() -> InlineKeyboardMarkup:
+    # Sirf wo buttons jo DM se dabane par ASLI kaam karte hain.
+    # Jo group me chalte hain ya argument maangte hain (perms, getid, setid,
+    # ban, unban, autopost, btnstyle) wo panel se hata diye — command se
+    # ab bhi chalte hain, par button dabane par sirf "usage" dikhta tha.
     acts = ["stats", "diag", "chats", "audience", "sync", "mongo",
-            "links", "posts", "audit", "broadcast", "btnstyle", "admins",
-            "perms", "getid", "setid", "ban", "unban", "members",
-            "autopost", "admin", "gate", "export"]
+            "links", "posts", "audit", "broadcast", "admins",
+            "members", "admin", "gate", "export",
+            "maintenance", "user", "top", "backup"]
     labels = {"stats": "📊 Stats", "diag": "🩺 Diag", "chats": "💬 Chats",
               "audience": "👥 Audience", "sync": "🔄 Sync", "mongo": "🗄 Mongo",
               "links": "🔗 Links", "posts": "📝 Posts", "audit": "🧾 Audit",
@@ -1762,7 +1800,8 @@ def _owner_panel_kb() -> InlineKeyboardMarkup:
               "setid": "📌 Set ID", "ban": "⛔ Ban", "unban": "✅ Unban",
               "members": "📇 Members", "autopost": "⏰ Auto-post",
               "admin": "🛡 Add Admin", "gate": "🚪 Gate",
-              "export": "📤 Export"}
+              "export": "📤 Export", "maintenance": "🛠 Maintenance",
+              "user": "👤 User", "top": "🏆 Top", "backup": "💾 Backup"}
     rows, row = [], []
     for a in acts:
         row.append(_btn(labels.get(a, a), callback_data=f"owner:{a}",
@@ -1787,10 +1826,10 @@ async def cmd_claim(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if cur:
         if cur == uid:
             await update.effective_message.reply_text(
-                "Tum pehle se owner ho. /owner se panel kholo.")
+                "You are already the owner. Open /owner for the panel.")
         else:
             await update.effective_message.reply_text(
-                "Owner pehle se set hai — claim band.")
+                "An owner is already set, so claiming is closed.")
         return
     db_owner_set(uid)
     try:
@@ -2271,7 +2310,7 @@ async def _send_human(bot, chat_id, text, reply_to=None):
         await _safe(bot.send_message, chat_id, part, **kw)
 
 
-async def _known_chats_lines(context, me) -> list:
+async def _known_chats_lines(context, me, skip=None) -> list:
     """Bot jin chats me hai unki LIVE list (id, title, type, bot ka status,
     aur kaunse block se juda hai)."""
     known = db_get_chats()
@@ -2293,6 +2332,14 @@ async def _known_chats_lines(context, me) -> list:
         if c:
             bound[_cid_key(c)] = blk["name"]   # @username bhi chalega
     items = sorted(known.items(), key=lambda kv: kv[1].get("title", "").lower())
+    _skip = skip or set()
+    # Jo chat upar block ke roop me already dikh chuki hai, use dobara na dikhao
+    # (yahi wajah thi ki ek hi channel 2-3 baar dikh raha tha).
+    items = [(k, c) for k, c in items
+             if _cid_key(c.get("id") or k) not in _skip]
+    if not items:
+        return []
+    out[1] = f"{bd('CHATS BOT IS IN')} ({len(items)})"
     for _k, c in items[:15]:
         cid = c.get("id")
         try:
@@ -2352,17 +2399,17 @@ async def cmd_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if why == "not configured":
         await update.effective_message.reply_text(
             f"{bd('ROSTER OFF')}\n\n"
-            f"{sc('3 cheezein chahiye')}:\n"
+            f"{sc('you need three things')}:\n"
             f"1) my.telegram.org > API development tools > app banao "
             f"-> api_id + api_hash milenge\n"
             f"2) Render > Environment: TG_API_ID, TG_API_HASH\n"
-            f"3) requirements me telethon add karo\n\n"
-            f"{sc('ye feature optional hai — iske bina bot normal chalta hai')}")
+            f"3) add telethon to requirements\n\n"
+            f"{sc('this feature is optional - the bot runs fine without it')}")
         return
     if why:
         await update.effective_message.reply_text(
             f"{bd('ROSTER OFF')} — {why}\n\n"
-            f"{sc('requirements me telethon add karke redeploy karo')}.")
+            f"{sc('add telethon to requirements, then redeploy')}.")
         return
     chat = update.effective_chat
     if str(chat.type) not in ("group", "supergroup", "channel"):
@@ -2380,7 +2427,7 @@ async def cmd_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(f"{bd('FAIL')} — {err}")
         return
     if not rows:
-        await update.effective_message.reply_text(f"{sc('koi member nahi mila')}.")
+        await update.effective_message.reply_text(f"{sc('no members found')}.")
         return
     out = [bd("MEMBERS"),
            f"{sc('chat')} : {chat.title or chat.id}",
@@ -2390,7 +2437,7 @@ async def cmd_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mark = " [bot]" if r["bot"] else ""
         out.append(f"{r['name'] or '-'}{mark}")
         out.append(f"   {sc('id')} {r['id']}   {tag}")
-    out += ["", f"{sc('read-only')} — {sc('isse koi DM nahi jata')}"]
+    out += ["", f"{sc('read-only')} - {sc('no DMs are sent from this list')}"]
     await _send_long(update.effective_message, "\n".join(out))
 
 
@@ -2441,8 +2488,8 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     out += ["", f"{sc('reachable')}: {bd(str(ok))}   {sc('failed')}: {bd(str(bad))}"]
     if bad:
         out.append("")
-        out.append(f"{sc('failed ka matlab')}: bot us chat me nahi hai, ya id galat hai.")
-        out.append(f"{sc('fix')}: us chat me bot ko add/admin banao — id khud aa jayegi.")
+        out.append(f"{sc('what failed means')}: the bot is not in that chat, or the id is wrong.")
+        out.append(f"{sc('fix')}: add the bot there as an admin - the id will come on its own.")
     await _send_long(update.effective_message, "\n".join(out))
 
 
@@ -2459,7 +2506,7 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     allp = db_post_all()
     if not allp:
         await update.effective_message.reply_text(
-            f"{sc('abhi koi post nahi hai')} — /post se banao")
+            f"{sc('no posts yet')} - create one with /post")
         return
     out = [bd("EXPORT"), f"{sc('posts')} : {len(allp)}",
            f"{sc('storage')} : {mongo_status()}", ""]
@@ -2472,7 +2519,7 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
         out.append(f"   {sc('channels')} : {', '.join(str(c) for c in ch) or '-'}")
         out.append(f"   {sc('posted')} : {p.get('posted')}")
         out.append("")
-    out.append(f"{sc('ye text copy karke rakh lo — Mongo down hone par yahi backup hai')}")
+    out.append(f"{sc('copy this text somewhere safe - it is your backup if Mongo goes down')}")
     await _send_long(update.effective_message, "\n".join(out))
 
 
@@ -2612,6 +2659,19 @@ async def cmd_mongo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_long(update.effective_message, "\n".join(out))
 
 
+def _diag_blocks() -> list:
+    """Diagnostics me kaunse blocks dikhein: config ke links + gate channels,
+    ek hi channel ek hi baar (id se dedupe)."""
+    out, seen = [], set()
+    for b in list(LINK_BLOCKS) + list(_gate_blocks()):
+        k = _cid_key(b.get("id") or b.get("name"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(b)
+    return out
+
+
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: poora status — har channel ALAG BLOCK me, spacing + font ke saath,
     aur neeche total kitne channel join karne hain wo summary."""
@@ -2674,7 +2734,8 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         out.append(f"{sc('add the bot as an ADMIN in')}: {', '.join(_no_id) if _no_id else '-'}")
         out.append(f"{sc('or bind by hand')} — /chats {sc('shows the ready-made /setid line')}.")
         out.append("")
-    for blk in LINK_BLOCKS:
+    _shown = set()
+    for blk in _diag_blocks():
         emoji = blk.get("emoji", "")
         out.append(sep)
         out.append(f"{emoji} {bd(blk['name'])}".strip())
@@ -2689,6 +2750,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out.append(f"{sc('fix')}  : /getid  {sc('or')}  /setid")
             out.append("")
             continue
+        _shown.add(_cid_key(cid))
         out.append(f"{sc('id')}   : {cid}")   # plain rakha - copy karne me aasan
         try:
             bm = await context.bot.get_chat_member(chat_id=cid, user_id=me.id)
@@ -2713,7 +2775,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
             out.append(f"{sc('you')}  : {bd('?')} - {_err_hint(e)}")
         out.append("")
     # Bot jin chats me hai (chahe block se match kare ya na) — poora section.
-    out.extend(await _known_chats_lines(context, me))
+    out.extend(await _known_chats_lines(context, me, skip=_shown))
 
     need = required_count()   # gate wala hi hisaab (saare require_join blocks)
     out.append(sep)
@@ -2799,7 +2861,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 update.effective_chat.id,
                 f"{fonts.bold(name)}\n{blk['url']}\n\n"
-                f"{fonts.small_caps('wapas aa kar Verify dabao')}")
+                f"{fonts.small_caps('come back and tap Verify')}")
         except Exception:
             pass
         return
@@ -2862,7 +2924,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         _base = (q.message.text or "") if q.message else ""
         if _act == "p":
-            await q.answer("Pending — koi action nahi liya")
+            await q.answer("Marked pending - no action taken")
             await _safe(q.edit_message_text,
                         f"{_base}\n\n⏳ pending")
             return
@@ -2936,7 +2998,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _sc = _post_scope.pop(user.id, None)
         # Button render par nahi — CHALANE ke waqt check (bypass-proof).
         if t not in _post_types_for(user.id, _sc):
-            await q.answer("Ye type tumhare liye nahi hai", show_alert=False)
+            await q.answer("That type is not available to you", show_alert=False)
             log.warning("Post type blocked: %s tried %r", user.id, t)
             return
         if _sc == "admin":
@@ -2950,10 +3012,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             await _safe(
                 context.bot.send_message, update.effective_chat.id,
-                f"{fonts.bold('Link bhejo')}")
+                f"{fonts.bold('Send the link')}")
             return
         if not _channels_for(user.id, _sc):
-            await q.answer("Koi channel set nahi hai", show_alert=True)
+            await q.answer("No channel is set up", show_alert=True)
             return
         _post_flow[user.id] = {"type": t, "step": 0, "data": {}, "channels": [],
                                "scope": _sc, "_t": time.time()}
@@ -3188,12 +3250,12 @@ def _inline_results(context, query: str) -> list:
     out.append(_art(
         "channel", "Avenor Apps AI — channel",
         "apps, AI tools and updates",
-        "apps aur AI tools yahan pehle aate hain.",
+        "new apps and AI tools land here first.",
         CHANNEL_LINK, "open channel"))
     out.append(_art(
         "group", "Avenor AI Community — group",
         "people talk here",
-        "yahan log baat karte hain.",
+        "people talk here.",
         COMMUNITY_LINK, "open group"))
     if q:
         # Query ko base64 karke bot tak le jao — DM khulega aur jawab turant
@@ -3404,9 +3466,9 @@ async def _ephemeral_welcome(context, chat, member) -> None:
             [_btn("Avenor Apps AI", url=CHANNEL_LINK)]]
     name = (member.first_name or "you").strip()
     text = (f"hey {name} — welcome.\n\n"
-            f"main mahiru hoon, isi group me rehti hoon. kuch bhi poochna ho "
-            f"to yahin likh do ya mujhe private me message kar lo.\n\n"
-            f"(ye message sirf tumhe dikh raha hai)")
+            f"I am Mahiru. I live in this group - ask me anything here, or "
+            f"message me privately.\n\n"
+            f"(only you can see this)")
     sent = await _send_ephemeral(context.bot, chat.id, member.id, text,
                                  InlineKeyboardMarkup(rows))
     if sent is not None:
@@ -3468,8 +3530,8 @@ async def _join_welcome_dm(context, req, chat) -> None:
             [_btn("say hi to Mahiru",
                   url=f"https://t.me/{context.bot.username}?start=src_joinreq")]]
     text = (f"hey {name} — request mil gayi, andar aa sakte ho.\n\n"
-            f"main mahiru hoon. baaki jagah bhi hai agar dekhna ho:\n"
-            f"channel me apps aur AI tools, group me log.\n\n"
+            f"I am Mahiru. There are two more places you might like:\n"
+            f"apps and AI tools in the channel, people in the group.\n\n"
             f"kuch bhi poochna ho to yahin likh do, main padh rahi hoon.")
     sent = await _safe(context.bot.send_message, target, text,
                        reply_markup=InlineKeyboardMarkup(rows))
@@ -3695,12 +3757,11 @@ async def _auto_intro(context, chat) -> None:
         return                          # ek hi baar, hamesha ke liye
     is_channel = str(getattr(chat, "type", "")) == "channel"
     if is_channel:
-        text = ("main mahiru hoon — is channel me rehungi.\n\n"
-                "naye apps, tools aur updates yahin aate hain.")
+        text = ("I am Mahiru - I will be here in this channel.\n\n"
+                "New apps, tools and updates land here.")
     else:
-        text = ("hey — main mahiru hoon. ab is group me rehti hoon.\n\n"
-                "kuch bhi poocho, ya mujhe tag karo. chup-chaap baithi "
-                "nahi rahungi.")
+        text = ("hey - I am Mahiru. I live here now.\n\n"
+                "Ask me anything, or tag me. I will not sit quiet.")
     sent = await _safe(context.bot.send_message, chat.id, text,
                        reply_markup=_intro_kb(context))
     if sent is not None:
@@ -3878,6 +3939,11 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     db_add_user(user)
     if db_is_banned(user.id):
         return
+    # Maintenance: AI band (owner ke commands chalte rahenge).
+    if db_maintenance_get() and not is_owner(user.id):
+        await _safe(update.effective_message.reply_text,
+                    "The bot is under maintenance right now. Please try again later.")
+        return
     fl = _post_flow.get(user.id)
     if fl is not None:
         # Flow kabhi expire nahi hota tha: /post shuru karke chhod dene par
@@ -3955,6 +4021,8 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = msg.text or msg.caption or ""
     if not text:
         return
+    if db_maintenance_get():
+        return                      # maintenance me group me AI chup
     entities = msg.entities or msg.caption_entities or []
     learn_chat(update)
     _note_message(update.effective_user.id, text)
@@ -4127,7 +4195,7 @@ async def _need_owner(update):
         await _safe(
             update.effective_message.reply_text,
             "Owner set nahi hai. Ek hi baar /claim bhejo (tum owner ban jaoge) "
-            "— ya Render me OWNER_ID=<tumhara id> daalo.")
+            "- or set OWNER_ID=<your id> on Render.")
     return False
 
 
@@ -4432,7 +4500,7 @@ async def cmd_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (f"{bd('ADMIN PANEL')}\n\n"
             f"📝 {sc('Post')} — anime ya movie ka link banao\n"
             f"📄 {sc('Posts')} — banaye hue links\n\n"
-            f"{sc('group me reply karke')}: /del  /pin  /kick  /unkick")
+            f"{sc('in a group, reply to a message')}: /del  /pin  /kick  /unkick")
     await update.effective_message.reply_text(text, reply_markup=_admin_panel_kb(uid))
 
 
@@ -4463,7 +4531,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if op in ("list", "show"):
         out = [bd("ADMINS"), ""]
         if not _ids():
-            out.append(sc("koi admin nahi hai"))
+            out.append(sc("no admins yet"))
         for a in _ids():
             src = "env" if a in ADMIN_IDS else "db"
             out.append(f"🛡 {bd(admin_name(a))}")
@@ -4481,7 +4549,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             uid = int(args[1])
         except ValueError:
-            await msg.reply_text(f"{sc('user id numeric honi chahiye')}")
+            await msg.reply_text(f"{sc('the user id must be a number')}")
             return
         name = " ".join(args[2:]).strip() or f"Admin {len(_ids()) + 1}"
         db_admin_add(uid, name)
@@ -4491,8 +4559,8 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(
             f"{sc('admin add')}: {bd(name)} ({uid})\n"
             f"{sc('permissions')}: post, posts, del, pin, kick, unkick\n\n"
-            f"{sc('uska / menu set ho gaya')} — "
-            f"{sc('wo chat band karke dobara kholega to naya menu dikhega')}")
+            f"{sc('their command menu is set')} - "
+            f"{sc('they need to close and reopen the chat to see it')}")
         return
 
     if op in ("remove", "del", "rm"):
@@ -4508,7 +4576,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ok:
             await _refresh_menu(context, uid)  # wapis member menu
         await msg.reply_text(f"{sc('admin remove')}: {uid}" if ok
-                             else f"{sc('ye id DB admins me nahi hai')}"
+                             else f"{sc('that id is not in the database admins')}"
                                   f" ({sc('env wale ko Render se hatao')})")
         return
 
@@ -4857,7 +4925,7 @@ async def _post_channel_kb(chat_id, context, uid, edit_msg=None):
     if not _ch:
         await _safe(context.bot.send_message, chat_id,
                     "Admin ke liye koi channel set nahi hai. Owner se bolo: "
-                    "Render me ADMIN_CHANNELS daalein.")
+                    "set ADMIN_CHANNELS on Render.")
         return
     kb = InlineKeyboardMarkup(_channel_rows(set(fl.get("channels") or []), _ch))
     txt = (f"{fonts.bold('Where should it be posted?')}\n"
@@ -4959,7 +5027,7 @@ async def _post_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not link:
             await update.effective_message.reply_text(
                 f"{fonts.bold('Link sahi nahi lag raha')}\n"
-                f"{fonts.small_caps('https:// se shuru karo')} — dobara bhejo.")
+                f"{fonts.small_caps('it must start with https://')} - send it again.")
             return
         code = _new_code()
         db_post_save(code, {
@@ -5433,7 +5501,7 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{sc('band karne ke liye')}: /autopost off")
         else:
             await msg.reply_text(
-                f"{bd('AUTO-POST')} — {sc('abhi set nahi hai')}\n\n"
+                f"{bd('AUTO-POST')} — {sc('not set yet')}\n\n"
                 f"/autopost 09:30 good morning ☁\n"
                 f"/autopost off")
         return
@@ -5444,7 +5512,7 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for j in jq.get_jobs_by_name(f"autopost:{chat.id}"):
                 j.schedule_removal()
         await msg.reply_text(f"{sc('auto-post band')}" if ok
-                             else f"{sc('pehle se band hai')}")
+                             else f"{sc('already off')}")
         return
     _m = re.match(r"^(\d{1,2}):(\d{2})$", str(args[0]))
     if not _m:
@@ -5454,7 +5522,7 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     h, mi = int(_m.group(1)), int(_m.group(2))
     if not (0 <= h < 24 and 0 <= mi < 60):
-        await msg.reply_text(f"{sc('time galat hai')} — 00:00 se 23:59")
+        await msg.reply_text(f"{sc('invalid time')} - 00:00 to 23:59")
         return
     text = " ".join(args[1:]).strip()
     if not text:
@@ -5473,8 +5541,8 @@ async def cmd_autopost(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{sc('text')} : {text[:120]}")
     else:
         await msg.reply_text(
-            f"{sc('set to gaya par job-queue nahi hai')} — "
-            f"{sc('restart ke baad khud chalega')}.")
+            f"{sc('saved, but no job queue')} - "
+            f"{sc('it will start after a restart')}.")
 
 
 async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5506,7 +5574,7 @@ async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cid = _block_chat_id(b)
             out.append(f"• {b['name']} — {sc('id')} {cid if cid else bd('NO ID')}")
         if not blocks:
-            out += [f"{sc('gate band hai — koi channel join karna zaroori nahi')}", "",
+            out += [f"{sc('the gate is off - no channel has to be joined')}", "",
                     f"{sc('add')}: /gate add @channel Naam"]
         else:
             out += ["", f"{sc('add')}: /gate add @channel Naam",
@@ -5535,8 +5603,8 @@ async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = name or (ch.title or target)
         except Exception as e:
             await msg.reply_text(
-                f"{bd('ID NAHI MILI')} — {_err_hint(e)}\n\n"
-                f"{sc('bot ko us channel me ADMIN banao, phir dobara')} /gate add")
+                f"{bd('ID NOT FOUND')} - {_err_hint(e)}\n\n"
+                f"{sc('make the bot an admin in that channel, then run')} /gate add")
             return
         url = f"https://t.me/{target.lstrip('@')}" if target.startswith("@") else None
         if not url:
@@ -5546,12 +5614,12 @@ async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 url = None
         if not url:
-            await msg.reply_text(f"{sc('channel ka link nahi bana — @username do')}")
+            await msg.reply_text(f"{sc('could not create a link for it - give me an @username')}")
             return
         db_gate_add(name, url, cid)
         await msg.reply_text(
-            f"{sc('gate me joda')}: {bd(name)}\n{sc('id')} {cid}\n"
-            f"{sc('ab ye join karna zaroori hai')}")
+            f"{sc('added to the gate')}: {bd(name)}\n{sc('id')} {cid}\n"
+            f"{sc('joining it is now required')}")
         return
 
     if op in ("remove", "del", "rm"):
@@ -5561,7 +5629,7 @@ async def cmd_gate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = " ".join(args[1:]).strip()
         ok = db_gate_del(name)
         await msg.reply_text(f"{sc('hata diya')}: {name}" if ok
-                             else f"{sc('ye naam gate me nahi hai')}")
+                             else f"{sc('that name is not in the gate')}")
         return
 
     await msg.reply_text(f"{sc('use')}: /gate on|off|add|remove|list")
@@ -5648,6 +5716,350 @@ async def cmd_delete_my_data(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "• my memory of your conversations\n\n"
         "It cannot be undone. Delete?",
         reply_markup=kb)
+
+
+def _user_record(uid) -> dict:
+    """Ek user ka record. db_all_users() LIST deta hai — usme se id se dhoondo."""
+    try:
+        want = int(uid)
+    except (TypeError, ValueError):
+        return {}
+    for u in (db_all_users() or []):
+        try:
+            if int(u.get("id")) == want:
+                return u
+        except (TypeError, ValueError):
+            continue
+    return {}
+
+
+def _target_user(update, context):
+    """Reply ya pehle argument se (uid, name) nikalo."""
+    msg = update.effective_message
+    r = getattr(msg, "reply_to_message", None)
+    if r is not None and getattr(r, "from_user", None) is not None:
+        u = r.from_user
+        return int(u.id), (u.full_name or str(u.id))
+    args = context.args or []
+    if args:
+        try:
+            return int(args[0]), str(args[0])
+        except ValueError:
+            return 0, ""
+    return 0, ""
+
+
+def _group_only(update) -> bool:
+    return str(getattr(update.effective_chat, "type", "")) in ("group", "supergroup")
+
+
+async def cmd_mute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: member ko bolne se roko (default 60 min). Reply ya id se."""
+    if not await _need_owner(update):
+        return
+    bd = fonts.bold
+    msg = update.effective_message
+    if not _group_only(update):
+        await msg.reply_text("This works only inside a group.")
+        return
+    uid, name = _target_user(update, context)
+    if not uid:
+        await msg.reply_text("Reply to a message, or give a user id: /mute <id> [minutes]")
+        return
+    mins = 60
+    _a = context.args or []
+    if len(_a) > 1:
+        try:
+            mins = max(1, min(int(_a[1]), 10080))     # max 7 din
+        except ValueError:
+            pass
+    until = datetime.now(timezone.utc) + timedelta(minutes=mins)
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=update.effective_chat.id, user_id=uid,
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until)
+        await msg.reply_text(f"{bd('muted')} : {name} — {mins} min")
+    except Exception as e:
+        await msg.reply_text(f"{bd('failed')} — {_err_hint(e)}")
+
+
+async def cmd_unmute(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: mute hatao."""
+    if not await _need_owner(update):
+        return
+    bd = fonts.bold
+    msg = update.effective_message
+    if not _group_only(update):
+        await msg.reply_text("This works only inside a group.")
+        return
+    uid, name = _target_user(update, context)
+    if not uid:
+        await msg.reply_text("Reply to a message, or give a user id: /unmute <id>")
+        return
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=update.effective_chat.id, user_id=uid,
+            permissions=ChatPermissions(
+                can_send_messages=True, can_send_audios=True,
+                can_send_documents=True, can_send_photos=True,
+                can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True))
+        await msg.reply_text(f"{bd('unmuted')} : {name}")
+    except Exception as e:
+        await msg.reply_text(f"{bd('failed')} — {_err_hint(e)}")
+
+
+async def cmd_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: warning do. 3 par khud kick."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    msg = update.effective_message
+    if not _group_only(update):
+        await msg.reply_text("This works only inside a group.")
+        return
+    uid, name = _target_user(update, context)
+    if not uid:
+        await msg.reply_text("Reply to a message, or give a user id: /warn <id>")
+        return
+    n = db_warn_add(update.effective_chat.id, uid)
+    if n >= 3:
+        try:
+            await context.bot.ban_chat_member(update.effective_chat.id, uid)
+            await context.bot.unban_chat_member(update.effective_chat.id, uid)
+        except Exception:
+            pass
+        db_warn_clear(update.effective_chat.id, uid)
+        await msg.reply_text(f"{bd('3/3')} — {name} {sc('was removed')}")
+        return
+    await msg.reply_text(f"{bd(f'{n}/3')} — {name} {sc('warned')}")
+
+
+async def cmd_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: warnings saaf karo."""
+    if not await _need_owner(update):
+        return
+    bd = fonts.bold
+    msg = update.effective_message
+    uid, name = _target_user(update, context)
+    if not uid:
+        await msg.reply_text("Reply to a message, or give a user id: /unwarn <id>")
+        return
+    db_warn_clear(update.effective_chat.id, uid)
+    await msg.reply_text(f"{bd('warnings cleared')} : {name}")
+
+
+async def cmd_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: is group me kis-kis ke kitne warnings hain."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    w = db_warns_all(update.effective_chat.id)
+    if not w:
+        await update.effective_message.reply_text(sc("no warnings in this group"))
+        return
+    out = [bd("WARNINGS"), ""]
+    for uid, n in sorted(w.items(), key=lambda kv: -int(kv[1])):
+        out.append(f"• {uid} — {n}/3")
+    await _send_long(update.effective_message, "\n".join(out))
+
+
+async def cmd_purge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: reply wale message se le kar ab tak sab delete (max 50)."""
+    if not await _need_owner(update):
+        return
+    msg = update.effective_message
+    if not _group_only(update):
+        await msg.reply_text("This works only inside a group.")
+        return
+    r = getattr(msg, "reply_to_message", None)
+    if r is None:
+        await msg.reply_text("Reply to the first message you want deleted.")
+        return
+    start, end = r.message_id, msg.message_id
+    if end - start > 50:
+        start = end - 50
+    gone = 0
+    for mid in range(start, end + 1):
+        try:
+            await context.bot.delete_message(msg.chat_id, mid)
+            gone += 1
+        except Exception:
+            pass
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    log.info("Purge: %s messages in %s", gone, msg.chat_id)
+
+
+async def cmd_lock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: group freeze — sirf admins bol sakte hain."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    if not _group_only(update):
+        await update.effective_message.reply_text("This works only inside a group.")
+        return
+    if not (context.args or []):
+        await update.effective_message.reply_text(
+            f"{sc('lock')} : {bd('ON' if db_lock_get(update.effective_chat.id) else 'OFF')}"
+            f"\n\n/lock   |   /unlock")
+        return
+    try:
+        await context.bot.set_chat_permissions(
+            update.effective_chat.id,
+            ChatPermissions(can_send_messages=False))
+        db_lock_set(update.effective_chat.id, True)
+        await update.effective_message.reply_text(f"{bd('locked')} — admins only")
+    except Exception as e:
+        await update.effective_message.reply_text(f"{bd('failed')} — {_err_hint(e)}")
+
+
+async def cmd_unlock(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: group wapas khol do."""
+    if not await _need_owner(update):
+        return
+    bd = fonts.bold
+    if not _group_only(update):
+        await update.effective_message.reply_text("This works only inside a group.")
+        return
+    try:
+        await context.bot.set_chat_permissions(
+            update.effective_chat.id,
+            ChatPermissions(
+                can_send_messages=True, can_send_audios=True,
+                can_send_documents=True, can_send_photos=True,
+                can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True,
+                can_send_other_messages=True, can_add_web_page_previews=True))
+        db_lock_set(update.effective_chat.id, False)
+        await update.effective_message.reply_text(f"{bd('unlocked')}")
+    except Exception as e:
+        await update.effective_message.reply_text(f"{bd('failed')} — {_err_hint(e)}")
+
+
+async def cmd_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: poora AI band / chalu — sirf owner commands chalte rahenge."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text(
+            f"{sc('maintenance')} : {bd('ON' if db_maintenance_get() else 'OFF')}\n\n"
+            f"/maintenance on   |   /maintenance off")
+        return
+    on = str(args[0]).lower() in ("on", "1", "yes", "true")
+    db_maintenance(on)
+    await update.effective_message.reply_text(
+        f"{sc('maintenance')} : {bd('ON' if on else 'OFF')}")
+
+
+async def cmd_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: ek user ka poora card — ban, warns, referrals, source."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    uid, name = _target_user(update, context)
+    if not uid:
+        await update.effective_message.reply_text(
+            "Reply to a message, or give an id: /user <id>")
+        return
+    u = _user_record(uid)
+    s_ = db_stats()
+    out = [bd("USER"), "",
+           f"{sc('id')}      : {uid}",
+           f"{sc('name')}    : {u.get('first_name') or name}",
+           f"{sc('username')} : @{u.get('username')}" if u.get("username") else f"{sc('username')} : -",
+           f"{sc('joined')}  : {u.get('joined') or u.get('first_seen') or '-'}",
+           f"{sc('last')}    : {u.get('last_seen') or '-'}",
+           f"{sc('source')}  : {u.get('src') or 'direct'}",
+           f"{sc('invites')} : {u.get('ref_count') or 0}",
+           f"{sc('banned')}  : {bd('yes') if db_is_banned(uid) else 'no'}",
+           f"{sc('warns')}   : {db_warn_get(update.effective_chat.id, uid) if _group_only(update) else '-'}",
+           f"{sc('total users')} : {s_['total_users']}"]
+    await _send_long(update.effective_message, "\n".join(out))
+
+
+async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: top referrers."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    # db_ref_rank(uid) ek user ki rank deta hai — yahan poora leaderboard chahiye,
+    # isliye referrals se seedha ginte hain.
+    rows = sorted(((int(k), int((v or {}).get("count") or 0))
+                   for k, v in (db_ref_all() or {}).items()),
+                  key=lambda kv: -kv[1])[:10]
+    rows = [(u, n) for u, n in rows if n > 0]
+    if not rows:
+        await update.effective_message.reply_text(sc("no referrals yet"))
+        return
+    out = [bd("TOP REFERRERS"), ""]
+    for i, (uid, n) in enumerate(rows, 1):
+        nm = _user_record(uid).get("first_name") or str(uid)
+        out.append(f"{i}. {nm} — {bd(str(n))}")
+    await _send_long(update.effective_message, "\n".join(out))
+
+
+async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: poora database file ke roop me apne DM me."""
+    if not await _need_owner(update):
+        return
+    sc = fonts.small_caps
+    path = getattr(storage, "DB_PATH", None)
+    try:
+        if not path or not os.path.exists(path):
+            await update.effective_message.reply_text(sc("no local database file yet"))
+            return
+        with open(path, "rb") as f:
+            await context.bot.send_document(
+                update.effective_chat.id, document=f,
+                filename=f"mahiru-backup-{datetime.now().strftime('%Y%m%d-%H%M')}.json",
+                caption=sc("full database backup"))
+    except Exception as e:
+        await update.effective_message.reply_text(f"failed — {_err_hint(e)}")
+
+
+async def cmd_unpin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: reply wala message unpin."""
+    if not await _need_owner(update):
+        return
+    bd = fonts.bold
+    msg = update.effective_message
+    r = getattr(msg, "reply_to_message", None)
+    if r is None:
+        await msg.reply_text("Reply to the pinned message.")
+        return
+    try:
+        await context.bot.unpin_chat_message(msg.chat_id, r.message_id)
+        await msg.reply_text(f"{bd('unpinned')}")
+    except Exception as e:
+        await msg.reply_text(f"{bd('failed')} — {_err_hint(e)}")
+
+
+async def cmd_antispam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """OWNER: is group me link/forward spam khud delete karo."""
+    if not await _need_owner(update):
+        return
+    sc, bd = fonts.small_caps, fonts.bold
+    if not _group_only(update):
+        await update.effective_message.reply_text("This works only inside a group.")
+        return
+    args = context.args or []
+    if not args:
+        on = db_antispam_get(update.effective_chat.id)
+        await update.effective_message.reply_text(
+            f"{sc('antispam')} : {bd('ON' if on else 'OFF')}\n\n"
+            f"/antispam on   |   /antispam off")
+        return
+    on = str(args[0]).lower() in ("on", "1", "yes", "true")
+    db_antispam_set(update.effective_chat.id, on)
+    await update.effective_message.reply_text(
+        f"{sc('antispam')} : {bd('ON' if on else 'OFF')}")
 
 
 async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5743,6 +6155,20 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("claim", cmd_claim))
     app.add_handler(CommandHandler("gate", cmd_gate))
     app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("maintenance", cmd_maintenance))
+    app.add_handler(CommandHandler("user", cmd_user))
+    app.add_handler(CommandHandler("top", cmd_top))
+    app.add_handler(CommandHandler("backup", cmd_backup))
+    app.add_handler(CommandHandler("mute", cmd_mute))
+    app.add_handler(CommandHandler("unmute", cmd_unmute))
+    app.add_handler(CommandHandler("warn", cmd_warn))
+    app.add_handler(CommandHandler("unwarn", cmd_unwarn))
+    app.add_handler(CommandHandler("warns", cmd_warns))
+    app.add_handler(CommandHandler("purge", cmd_purge))
+    app.add_handler(CommandHandler("lock", cmd_lock))
+    app.add_handler(CommandHandler("unlock", cmd_unlock))
+    app.add_handler(CommandHandler("antispam", cmd_antispam))
+    app.add_handler(CommandHandler("unpin", cmd_unpin))
     app.add_handler(CommandHandler("rules", cmd_rules))
     app.add_handler(CommandHandler("report", cmd_report))
     app.add_handler(CommandHandler("perms", cmd_perms))
