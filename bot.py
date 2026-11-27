@@ -123,6 +123,7 @@ from config import (
     POST_TYPES,
     POST_FIELDS,
     POST_FIELDS_BY_TYPE,
+    POST_FIELDS_LEGACY,
     POST_BADGE_BY_TYPE,
     POST_BUTTON_BY_TYPE,
     POST_BUTTON_TEXT,
@@ -1333,7 +1334,7 @@ def _post_only_username(chat) -> bool:
 
     Audit F-05: dono taraf case ko lowercase karo. Pehle candidate lowercase
     hota tha par block ids case-preserving the, isliye owner ke apne channel
-    ("@AvenorLab") "post-only target" maan liye jaate the — learn_chat
+    ("@AvenorFeed") "post-only target" maan liye jaate the — learn_chat
     skip ho jata tha aur /chats me nahi dikhte the.
     """
     uname = str(getattr(chat, "username", "") or "").strip().lower()
@@ -3173,6 +3174,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _post_ask(update.effective_chat.id, context, user.id)
         return
 
+    if data.startswith("postedit:"):
+        if not is_privileged(user.id):
+            await q.answer()
+            return
+        fl = _post_flow.get(user.id)
+        if not fl:
+            await q.answer("Flow expired — send /post again.", show_alert=True)
+            return
+        arg = data.split(":", 1)[1]
+        if arg == "start":
+            await q.answer()
+            rows = [[_btn(f, callback_data=f"postedit:{f}", style="primary")]
+                    for f in _post_fields(fl["type"]) if f != "Link"]
+            await context.bot.send_message(
+                update.effective_chat.id, f"{fonts.bold('Which field?')}",
+                reply_markup=InlineKeyboardMarkup(rows))
+            return
+        await q.answer()
+        fl["await_edit"] = arg
+        await context.bot.send_message(
+            update.effective_chat.id,
+            f"{fonts.bold('Send the new')} {fonts.bold(arg)}")
+        return
+
     if data.startswith("postgo:"):
         if not is_privileged(user.id):
             await q.answer()
@@ -3362,7 +3387,7 @@ def _inline_results(context, query: str) -> list:
         "found her ☁",
         f"https://t.me/{bot_name}?start=src_inline", "say hi"))
     out.append(_art(
-        "channel", "Avenor Lab — channel",
+        "channel", "Avenor Feed — channel",
         "apps, AI tools and updates",
         "new apps and AI tools land here first.",
         CHANNEL_LINK, "open channel"))
@@ -3581,7 +3606,7 @@ async def _ephemeral_welcome(context, chat, member) -> None:
     _u = getattr(context.bot, "username", None) or BOT_USERNAME
     rows = [[_btn("say hi to Mahiru",
                   url=f"https://t.me/{_u}?start=src_ephemeral")],
-            [_btn("Avenor Lab", url=CHANNEL_LINK)]]
+            [_btn("Avenor Feed", url=CHANNEL_LINK)]]
     name = (member.first_name or "you").strip()
     text = (f"hey {name} — welcome.\n\n"
             f"I am Mahiru. I live in this group - ask me anything here, or "
@@ -3643,7 +3668,7 @@ async def _join_welcome_dm(context, req, chat) -> None:
         return
     target = getattr(req, "user_chat_id", None) or usr.id
     name = (usr.first_name or "you").strip()
-    rows = [[_btn("Avenor Lab", url=CHANNEL_LINK)],
+    rows = [[_btn("Avenor Feed", url=CHANNEL_LINK)],
             [_btn("Avenor Club", url=COMMUNITY_LINK)],
             [_btn("say hi to Mahiru",
                   url=f"https://t.me/{context.bot.username}?start=src_joinreq")]]
@@ -3677,7 +3702,7 @@ def _first_admin_id() -> int:
 async def _notify_admin_join_request(context, chat, usr) -> None:
     """Private anime channel ki join request -> Admin 1 ko DM + 3 buttons.
 
-    Owner ke apne channel (Avenor Lab) ke liye ye nahi chalta — wahan pehle jaisa
+    Owner ke apne channel (Avenor Feed) ke liye ye nahi chalta — wahan pehle jaisa
     auto-approve + welcome DM hi rehta hai.
     """
     target = _first_admin_id() or owner_id()
@@ -3857,7 +3882,7 @@ def _intro_kb(context) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [_btn("say hi to Mahiru",
               url=f"https://t.me/{_u}?start=src_intro", style="primary")],
-        [_btn("Avenor Lab", url=CHANNEL_LINK),
+        [_btn("Avenor Feed", url=CHANNEL_LINK),
          _btn("Avenor Club", url=COMMUNITY_LINK)],
     ])
 
@@ -4783,7 +4808,7 @@ def _as_url(v) -> str:
 
 def _norm_chat_id(x):
     """1001111111111 -> -1001111111111 (config me jo diya hai usko theek karo).
-    "@AvenorLab" jaisa username waisa hi rehta hai — Telegram dono leta hai."""
+    "@AvenorFeed" jaisa username waisa hi rehta hai — Telegram dono leta hai."""
     try:
         cid = int(x)
     except (TypeError, ValueError):
@@ -4801,19 +4826,63 @@ def _esc(t) -> str:
 
 
 def _post_fields(t) -> list:
-    """Us post TYPE ke fields (config.POST_FIELDS_BY_TYPE se). Type na ho to default."""
-    return POST_FIELDS_BY_TYPE.get(str(t or "").strip()) or POST_FIELDS
+    """Us post TYPE ke fields.
+
+    Teen jagah se: naye types (POST_FIELDS_BY_TYPE) -> purane save pade posts
+    ke types (POST_FIELDS_LEGACY) -> default (POST_FIELDS). Legacy sirf render
+    ke liye hai, naya post un types me ban nahi sakta."""
+    k = str(t or "").strip()
+    return POST_FIELDS_BY_TYPE.get(k) or POST_FIELDS_LEGACY.get(k) or POST_FIELDS
+
+
+# Pehli line me naam ke saath chhote se judne wale fields.
+_TITLE_META = ("Version", "Size")
+
+
+def _title_field(t) -> str:
+    """Kaunsa field caption ki pehli line banta hai.
+
+    "Name" ho to wahi; warna type ka pehla non-Link field ("Title" / "Headline").
+    Yahi field detail lines me dobara NAHI aata — pehle News/Tip me title do
+    baar chhapta tha."""
+    fields = _post_fields(t)
+    if "Name" in fields:
+        return "Name"
+    for f in fields:
+        if f != "Link":
+            return f
+    return "Name"
+
+
+def _title_text(p) -> str:
+    """Caption ki pehli line: naam + version + size, ek hi line me.
+
+    "OrbitBot v2.1 · 18 MB" — chat list preview me sirf pehli 2-3 line dikhti
+    hain, isliye sabse zaroori cheez wahin jaati hai."""
+    t = str(p.get(_title_field(p.get("type"))) or "").strip()
+    bits = []
+    v = str(p.get("Version") or "").strip()
+    if v:
+        bits.append(v if v[:1].lower() == "v" else f"v{v}")
+    sz = str(p.get("Size") or "").strip()
+    if sz:
+        bits.append(sz)
+    return " · ".join([t] + bits).strip(" ·")
 
 
 def _post_lines(t) -> list:
-    """Caption me kaunsi detail lines dikhengi — type ke fields se (Name/Link chhod ke)."""
-    return [f for f in _post_fields(t) if f not in ("Name", "Link")]
+    """Detail lines — jo fields pehli line me nahi gaye.
+
+    Title field, Name, Link, Version aur Size chhod diye jaate hain (wo pehli
+    line me ya button me jaate hain)."""
+    skip = {"Name", "Link", _title_field(t)} | set(_TITLE_META)
+    return [f for f in _post_fields(t) if f not in skip]
 
 
 async def _ep_line(p) -> str:
     """'S03 EPISODE 01-02 ADDED' jaisi ek line — AI banata hai, warna season se."""
     if "Season" not in _post_fields(p.get("type")):
-        # Jis type me Season nahi (APK / Update / News / Tip / Movie) usme
+        # Jis type me Season nahi (APK / Update / AI Tool / News / Tip) usme
         # "S03 EPISODE 01 ADDED" ka koi matlab nahi. Config ke badge map se
         # seedha label lo, warna "<TYPE> ADDED".
         t = str(p.get("type") or "Post")
@@ -4857,17 +4926,9 @@ def _post_caption(p, ep_line="", link_url="", text_links=True) -> str:
     Ep line aur WATCH & DOWNLOAD dono `link_url` par jaate hain (bot ka deep
     link — wahi jo neeche wale button me hai)."""
     bd = fonts.bold
-    # Title: "Name" field, aur jis category me Name nahi (News -> Headline,
-    # Tip -> Title) usme uska pehla field. Warna caption me "❝ - ❞" aata tha.
-    title = p.get("Name")
-    if not title:
-        for k in _post_fields(p.get("type")):
-            if k not in ("Link",) and p.get(k):
-                title = p.get(k)
-                break
-    # Telegram ka blockquote khud ek quote-mark dikhata hai. Uske upar
-    # "❝ ❞" lagane se double quotes ho jaate the — isliye hata diye.
-    out = [f"<blockquote>{_esc(bd(str(title or '-')))}</blockquote>", ""]
+    # Pehli line = naam + version + size (ek hi line, bold). Telegram ka
+    # blockquote khud quote-mark dikhata hai, isliye "❝ ❞" nahi lagate.
+    out = [f"<blockquote>{_esc(bd(_title_text(p) or '-'))}</blockquote>", ""]
     # Chhoti values ek saath inline jaati hain (►Version :- 1). Lambi ya
     # multi-line values (jaise 6-line changelog) ko APNA block milta hai,
     # apni line structure ke saath — pehle unhe 90 chars par kaat dete the
@@ -4881,10 +4942,10 @@ def _post_caption(p, ep_line="", link_url="", text_links=True) -> str:
         lines = [x.strip() for x in raw.splitlines() if x.strip()]
         if len(lines) > 1 or len(raw) > 60:
             body = "\n".join(lines)
-            blocks.append("<blockquote>►" + _esc(k) + ":\n"
+            blocks.append("<blockquote>" + _esc(bd(k)) + ":\n"
                           + _esc(_trim_words(body, 400)) + "</blockquote>")
         else:
-            det.append(f"►{k} :- {_esc(raw)}")
+            det.append(f"{_esc(bd(k))}: {_esc(raw)}")
     if det:
         out.append("<blockquote>" + "\n".join(det) + "</blockquote>")
         out.append("")
@@ -4989,8 +5050,35 @@ def _strip_urls(t: str) -> str:
 VISION_PROMPT = (
     "Look at this banner image and give only these lines (only what is visible; "
     "use ? for anything you cannot read). No extra talk, no markdown:\n"
-    "Name: \nSeason: \nQuality: \nLanguage: "
+    "Name: \nVersion: \nSize: \nPlatform: "
 )
+
+
+_VISION_LINE_RX = re.compile(r"^\s*([A-Za-z][A-Za-z ]{1,20}?)\s*:\s*(.+?)\s*$", re.M)
+
+
+def _fill_from_vision(fl, read) -> list:
+    """Banner se padhi lines ko seedha fields me bharo.
+
+    Sirf wahi fields jo (a) is type me hain, (b) abhi khali hain, aur
+    (c) value saaf padhi gayi hai. Return: kaunse fields bhare — user ko
+    batane ke liye (aur preview me Edit se badalne ke liye)."""
+    if not read:
+        return []
+    fields = _post_fields(fl["type"])
+    filled = []
+    for name, val in _VISION_LINE_RX.findall(str(read)):
+        v = val.strip().strip('"').strip()
+        if not v or v in ("?", "-", "—"):
+            continue
+        real = next((f for f in fields if f.lower() == name.strip().lower()), None)
+        if not real or real == "Link":
+            continue
+        if str(fl["data"].get(real) or "").strip():
+            continue
+        fl["data"][real] = v[:120]
+        filled.append(real)
+    return filled
 
 
 # ---------- channel chunne wale buttons ----------
@@ -5097,8 +5185,8 @@ async def _start_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
             f"@{context.bot.username} — then send /{POST_COMMAND} there.")
         return
     _post_flow.pop(update.effective_user.id, None)
-    # Admin ko sirf wahi types dikhte hain jo uske liye allowed hain
-    # (Upload = anime/movie). Owner ko sab.
+    # Admin ko sirf Anime / Movie dikhte hain (link flow). Owner ko apne
+    # 5 types: Release, Update, AI Tool, Dev Log, Tip.
     types = _post_types_for(uid, _scope)
     _post_scope[uid] = _scope          # posttype callback ko chahiye
     if _scope == "admin":
@@ -5126,11 +5214,20 @@ async def _post_ask(chat_id, context, uid):
         await context.bot.send_message(
             chat_id, f"Send {fonts.bold(f)}  ({fonts.small_caps('type')} skip {fonts.small_caps('to leave it out')})")
         return
+    await _post_preview(chat_id, context, uid)
+
+
+async def _post_preview(chat_id, context, uid):
+    """Preview + Post / Edit / Schedule. Field edit ke baad bhi yahi aata hai."""
+    fl = _post_flow.get(uid)
+    if not fl:
+        return
     preview = {"type": fl["type"], **fl["data"]}
     if not fl.get("ep_line"):
         fl["ep_line"] = await _ep_line(preview)
     kb = InlineKeyboardMarkup([[
-        _btn("Post now", callback_data="postgo:now", style="success"),
+        _btn("Post", callback_data="postgo:now", style="success"),
+        _btn("Edit", callback_data="postedit:start", style="primary"),
         _btn("Schedule", callback_data="postgo:sched", style="primary"),
     ]])
     chans = ", ".join(str(c) for c in (fl.get("channels") or []))
@@ -5174,6 +5271,14 @@ async def _post_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text(
             f"{_deep_link(context, code)}\n\n"
             f"{fonts.small_caps('jisko dena ho, ye bhej do')}")
+        return
+
+    # --- preview se ek field edit ---
+    if fl.get("await_edit"):
+        f = fl.pop("await_edit")
+        fl["data"][f] = "" if txt.lower() == "skip" else txt
+        fl["ep_line"] = ""          # badge dobara banao
+        await _post_preview(update.effective_chat.id, context, uid)
         return
 
     # --- banner image ka intezaar ---
@@ -5254,10 +5359,17 @@ async def on_private_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     fl.pop("await_image", None)
     await _safe(msg.reply_text, f"{fonts.small_caps('image received — reading it with AI')} …")
     read = await _vision_read(context, fl["image"], VISION_PROMPT)
-    if read:
+    filled = _fill_from_vision(fl, read)
+    if filled:
         await _safe(msg.reply_text,
-            f"{fonts.bold('AI read from the image')} — "
-            f"{fonts.small_caps('hint only, nothing is filled in')}:\n{read}")
+            f"{fonts.bold('Read from the image')} — "
+            f"{fonts.small_caps('filled')}: {', '.join(filled)}\n"
+            f"{fonts.small_caps('asking the rest now')} · "
+            f"{fonts.small_caps('preview me Edit se badal sakte ho')}")
+    elif read:
+        await _safe(msg.reply_text,
+            f"{fonts.bold('Image read')} — "
+            f"{fonts.small_caps('kuch saaf nahi mila, haath se bharo')}")
     await _post_ask(update.effective_chat.id, context, user.id)
 
 

@@ -5,7 +5,7 @@ moderates members, answers questions as an AI assistant, builds and schedules ch
 tracked deep link, and keeps its state in MongoDB so nothing is lost on redeploy.
 
 - **Bot:** [@MahiruOrbitBot](https://t.me/MahiruOrbitBot)  ·  Mahiru is the bot's name
-- **Channel:** [Avenor Lab](https://t.me/AvenorLab)
+- **Channel:** [Avenor Feed](https://t.me/AvenorFeed)
 - **Group:** [Avenor Club](https://t.me/AvenorClub)
 - **Repository:** [github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot)
 - **Developer:** [Deepak](https://github.com/Zevorylian) · [X](https://x.com/Zevorylian) · [Reddit](https://www.reddit.com/u/Zevorylian)
@@ -29,7 +29,7 @@ bot replies in place, with your channel buttons attached. This is the only suppo
 reach a chat it is not a member of; a bot cannot add itself anywhere.
 
 **Post builder.** `/post` walks through a type, the target channels, an optional banner, and that
-type's fields, then publishes a photo post with a caption and a *Download & Watch* button. The button
+type's fields, then publishes a photo post with a caption and a *Download* button. The button
 carries a deep link back to the bot, so every click is attributable. Posts can be scheduled in IST.
 
 **Privacy.** `/privacy` explains exactly what is stored and where it goes; `/delete_my_data` erases
@@ -131,20 +131,25 @@ commands, so a member never sees a list they cannot use.
 
 ## `/post`
 
-| Type | Fields |
-|---|---|
-| APK | Name, Version, Size, Android, Link |
-| Update | Name, Version, Whats New, Link |
-| AI Tool | Name, What It Does, Pricing, Link |
-| News | Headline, Summary, Source, Link |
-| Tip | Title, Tip, Link |
+| Type | Fields | Badge | Button |
+|---|---|---|---|
+| Release | Name, Version, Size, Platform, Link | `NEW RELEASE` | Download |
+| Update | Name, Version, What's New, Link | `UPDATE LIVE` | Get |
+| AI Tool | Name, What It Does, Pricing, Link | `NEW TOOL` | Try |
+| Dev Log | Title, What I Built, Link | `DEV LOG` | Read |
+| Tip | Title, Tip, Link | `TIP` | Read |
+
+The first caption line is the name plus version and size (`OrbitBot v2.1 · 18 MB`), because only the
+first few lines are visible in the chat list. `Link` never appears in the caption — it becomes the
+button. After the banner photo is sent, the AI reads it and fills the fields it can see; the preview's
+`Edit` button fixes anything it got wrong.
 
 Targets are set in `POST_CHANNELS`; both the channel and the group are configured. The bot must be an
 admin where it posts.
 
-The caption is built from the type's fields, so adding a category is a two-line change in `config.py`:
-add it to `POST_TYPES` and give it an entry in `POST_FIELDS_BY_TYPE`. An optional `POST_BADGE_BY_TYPE`
-entry controls the badge line (`NEW APK`, `APP UPDATED`, and so on).
+The caption is built from the type's fields. Adding a category means four entries in `config.py`:
+`POST_TYPES`, `POST_FIELDS_BY_TYPE`, `POST_BUTTON_BY_TYPE` (one word) and `POST_BADGE_BY_TYPE`. Button
+labels are kept to a single word so they never wrap on a phone.
 
 If a channel rejects the HTML caption, the bot retries that channel once with a plain caption. The
 button still carries the link, so the post is not lost.

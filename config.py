@@ -336,10 +336,10 @@ LINK_BLOCKS = [
     # (koi channel join karne ki shart nahi). Buttons /start par dikhte hain.
     # Baad me force-join chahiye to require_join: True kar dena aur id daal dena.
     {
-        "name": "Avenor Lab",
+        "name": "Avenor Feed",
         "emoji": "📢",
-        "url": "https://t.me/AvenorLab",
-        "id": "@AvenorLab",
+        "url": "https://t.me/AvenorFeed",
+        "id": "@AvenorFeed",
         "require_join": False,
         "row": 1,
     },
@@ -466,7 +466,7 @@ AI_BOT_LINK = os.getenv("AI_BOT_LINK", "https://t.me/MahiruOrbitBot") \
     .replace("AvenorOrbitBot", "MahiruOrbitBot")
 COMMUNITY_LINK = os.getenv("COMMUNITY_LINK", "https://t.me/AvenorClub")
 # Bot ka apna channel — apps / AI tools / updates yahan aate hain.
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AvenorLab")
+CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AvenorFeed")
 
 # ---- INVITE TIMING (Mahiru kab channel/group kholti hai) ---------------
 # Random nahi: code eligibility tay karta hai (kitni baat, cooldown,
@@ -659,7 +659,7 @@ CARE  (read this twice)
 - Politely refuse harmful, illegal or unsafe requests, briefly, in her own voice.
 
 HER TWO ROOMS (she knows these by heart, and she is proud of them without ever sounding like an advert)
-- her channel — Avenor Lab: {CHANNEL_LINK}
+- her channel — Avenor Feed: {CHANNEL_LINK}
   apps, AI tools and updates land here. this is where the new stuff goes first.
 - her group — Avenor Club: {COMMUNITY_LINK}
   people talk here, ask things, share what they found. it is a room, not a shop.
@@ -728,7 +728,7 @@ mahiru: "akela. that's a heavy thing to carry at this hour. i'm not going to fix
 one person you could message tonight?"
 
 person: "koi naya app hai?"
-mahiru: "haan — Avenor Lab par naye tools pehle aate hain. t.me/AvenorLab"
+mahiru: "haan — Avenor Feed par naye tools pehle aate hain. t.me/AvenorFeed"
 
 person: "who made you"
 mahiru: "deepak. one person, no team. that's the whole story."
@@ -886,29 +886,37 @@ POST_COMMAND = os.getenv("POST_COMMAND", "post").lstrip("/")
 
 # Post ke type buttons (jo /post par dikhte hain)
 POST_TYPES = [x.strip() for x in os.getenv(
-    "POST_TYPES", "Upload,APK,Update,AI Tool,News,Tip").split(",") if x.strip()]
+    "POST_TYPES", "Release,Update,AI Tool,Dev Log,Tip").split(",") if x.strip()]
 
 # AI kin cheezon ka sawaal poochhega (channel uske BAAD poochha jata hai).
 # Ye DEFAULT hai — us type ke liye jo niche POST_FIELDS_BY_TYPE me na ho.
 POST_FIELDS = [x.strip() for x in
-               os.getenv("POST_FIELDS", "Name,Season,Episodes,Quality,Language,Link").split(",") if x.strip()]
+               os.getenv("POST_FIELDS", "Name,Version,Size,Platform,Link").split(",") if x.strip()]
 
-# Har post TYPE ke apne sawaal. Movie me Season/Episodes ka matlab nahi hota,
-# isliye uske liye Year poochha jaata hai. Caption ki lines khud in fields se
-# banti hain (Name aur Link chhod ke).
+# Har post TYPE ke apne sawaal. Caption ki lines khud in fields se banti hain
+# (Name aur Link chhod ke). Yahan sirf wahi types hain jo owner ko button me
+# dikhte hain (POST_TYPES) — koi dead entry nahi.
 POST_FIELDS_BY_TYPE = {
-    # "Upload" = anime / movie / episode wala flow: naam -> link -> bot ka
-    # deep link -> strict gate -> asli link.
-    "Upload":   ["Name", "Link"],
-    # Har category ke apne fields. "Name" aur "Link" caption me alag jagah
-    # jaate hain, baaki sab detail lines banti hain.
-    "APK":     ["Name", "Version", "Size", "Android", "Link"],
+    # Owner ke 5 categories (dev / apps / tools). Caption ka rule:
+    #   pehli line = "Name" (ya "Title") + Version + Size, bold
+    #   "Link"    = caption me nahi, neeche wale button me
+    #   baaki sab = detail lines
+    # (Anime / Movie admin ka kaam hai — admin sirf link banata hai, LINK_TYPES.)
+    "Release": ["Name", "Version", "Size", "Platform", "Link"],
     "Update":  ["Name", "Version", "Whats New", "Link"],
     "AI Tool": ["Name", "What It Does", "Pricing", "Link"],
-    "News":    ["Headline", "Summary", "Source", "Link"],
+    "Dev Log": ["Title", "What I Built", "Link"],
     "Tip":     ["Title", "Tip", "Link"],
-    "Movie":   ["Name", "Year", "Quality", "Language", "Link"],
-    "Series":  ["Name", "Season", "Episodes", "Quality", "Language", "Link"],
+}
+
+# PURANE types — jo ab button me nahi hain. Ye sirf un posts ke liye hain jo
+# pehle se DB me pade hain (scheduled / draft), taaki unka caption waisa hi
+# render ho. Naya post in types me ban hi nahi sakta.
+POST_FIELDS_LEGACY = {
+    "Upload": ["Name", "Link"],
+    "APK":    ["Name", "Version", "Size", "Android", "Link"],
+    "News":   ["Headline", "Summary", "Source", "Link"],
+    "Series": ["Name", "Season", "Episodes", "Quality", "Language", "Link"],
 }
 
 # Har category ka badge (caption me "NEW APK" wali line). Jo yahan nahi hai
@@ -919,26 +927,25 @@ POST_FIELDS_BY_TYPE = {
 # Button ka label — chhota, action wala, aur badge se ALAG (warna dono ek hi
 # baat kehte hain: "UPDATE LIVE" + "Update").
 POST_BUTTON_BY_TYPE = {
-    "Upload":   "Get it",
-    "APK":     "Download",
-    "Update":  "Get it",
-    "AI Tool": "Try it",
-    "News":    "Read more",
-    "Tip":     "Read more",
+    # Ek shabd — mobile par button adha kata hua nahi dikhta.
+    "Release": "Download",
+    "Update":  "Get",
+    "AI Tool": "Try",
+    "Dev Log": "Read",
+    "Tip":     "Read",
 }
 
 # Caption me end wali badge line. Chhoti aur professional.
 POST_BADGE_BY_TYPE = {
-    "Upload":   "NEW UPLOAD",
-    "APK":     "NEW RELEASE",
+    "Release": "NEW RELEASE",
     "Update":  "UPDATE LIVE",
     "AI Tool": "NEW TOOL",
-    "News":    "NEWS",
+    "Dev Log": "DEV LOG",
     "Tip":     "TIP",
 }
 
 # Post me jo button lagta hai — ye bot ka deep link kholta hai
-POST_BUTTON_TEXT = os.getenv("POST_BUTTON_TEXT", "Download & Watch")
+POST_BUTTON_TEXT = os.getenv("POST_BUTTON_TEXT", "Download")
 
 # Deep link se aane wale user ko jo button dikhta hai (us channel ka link)
 JOIN_BUTTON_TEXT = os.getenv("JOIN_BUTTON_TEXT", "Request to Join")
@@ -959,8 +966,8 @@ JOIN_BUTTON_TEXT = os.getenv("JOIN_BUTTON_TEXT", "Request to Join")
 # sahi nahi lagta (supergroup id -100… se shuru hoti hai). Owner se confirm
 # hone ke baad /gate add se jod dena.
 GATE_CHANNELS = [
-    {"name": "Avenor Lab", "id": "@AvenorLab",
-     "url": "https://t.me/AvenorLab"},
+    {"name": "Avenor Feed", "id": "@AvenorFeed",
+     "url": "https://t.me/AvenorFeed"},
     {"name": "ANIME WORLD", "id": -1002549849997,
      "url": "https://t.me/c/2549849997"},
     {"name": "ANIME NEWS", "id": -1003910002446,
@@ -975,7 +982,7 @@ GATE_CHANNELS = [
 
 # ---- ADMIN ke channels (CODE me — Render env ki zaroorat nahi) ---------
 # Admin SIRF in channels me post kar sakta hai. Owner ke apne channel
-# (Avenor Lab / Avenor Club) admin ko dikhte hi nahi.
+# (Avenor Feed / Avenor Club) admin ko dikhte hi nahi.
 #
 # Ye wahi 5 channels hain jo owner ne ids ke saath diye. "ANIME WORLD" ka
 # doosra id (2072549849997) is list me NAHI hai — us id ka format galat hai
@@ -1009,12 +1016,14 @@ if _env_admin:
 POST_CHANNELS = [
     # Post kahan jayega. @username bhi chalega (numeric id ki tarah) — bot
     # us channel/group me ADMIN hona chahiye, warna post fail hoga.
-    [("Avenor Lab", "@AvenorLab"), ("Avenor Club", "@AvenorClub")],
+    [("Avenor Feed", "@AvenorFeed"), ("Avenor Club", "@AvenorClub")],
 ]
 
 # Post ke caption me credit line. Us par click karne se ye link khulta hai.
-POST_CREDIT_TEXT = os.getenv("POST_CREDIT_TEXT", "Avenor Orbit")
-POST_CREDIT_URL = os.getenv("POST_CREDIT_URL", "https://t.me/MahiruOrbitBot") \
+POST_CREDIT_TEXT = os.getenv("POST_CREDIT_TEXT", "Avenor Feed")
+# Credit line apne channel par jaati hai (bot par nahi) — click karne wala
+# channel par pahunche, jo post kar raha hai wahin.
+POST_CREDIT_URL = os.getenv("POST_CREDIT_URL", CHANNEL_LINK) \
     .replace("AvenorOrbitBot", "MahiruOrbitBot")
 
 # Episode line ke dono taraf ye emoji lagta hai (jaise 🫧 S01 EPISODE 01 ADDED 🫧)
