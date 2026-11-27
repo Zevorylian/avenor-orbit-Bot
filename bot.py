@@ -5523,6 +5523,9 @@ async def _start_post(update: Update, context: ContextTypes.DEFAULT_TYPE,
     # 5 types: Release, Update, AI Tool, Dev Log, Tip.
     types = _post_types_for(uid, _scope)
     _post_scope[uid] = _scope          # posttype callback ko chahiye
+    # Chhode hue /post flows aur scopes memory me jama na hon.
+    _prune(_post_flow, 2000)
+    _prune(_post_scope, 2000)
     if _scope == "admin":
         # Anime | Movie — do block, side by side (half half)
         kb = InlineKeyboardMarkup([[
