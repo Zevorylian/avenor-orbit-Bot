@@ -30,6 +30,7 @@ import difflib
 import json
 import hmac
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 import os
@@ -325,11 +326,32 @@ import storage as _storage
 # =====================================================================
 _ai_client = None
 
+# AI calls apne thread pool me chalte hain. Default executor (jo storage aur
+# vision bhi use karta hai) bhar jaye to poora bot atak jata hai — isliye
+# alag, bounded pool.
+_AI_POOL = ThreadPoolExecutor(
+    max_workers=max(4, AI_CONCURRENCY * 2), thread_name_prefix="ai")
+
 
 def _get_ai():
+    """AI client — SDK-level HTTP timeout ke saath.
+
+    Kyun: `asyncio.wait_for` sirf AWAIT cancel karta hai, chal raha THREAD
+    nahi. Provider atka to thread chalta rehta hai aur worker kha jata hai;
+    kuch fail messages ke baad pool bhar jata hai aur naye messages queue me
+    khade reh jaate hain (bot "dead" lagta hai). SDK timeout se thread khud
+    lautaata hai. Agar ye option SDK par available na ho to plain client —
+    bot phir bhi chalta rahega."""
     global _ai_client
     if _ai_client is None:
-        _ai_client = genai.Client(api_key=AI_API_KEY)
+        try:
+            _ai_client = genai.Client(
+                api_key=AI_API_KEY,
+                http_options=types.HttpOptions(
+                    timeout=max(5, AI_TIMEOUT) * 1000))   # milliseconds
+        except Exception as e:
+            log.warning("AI client timeout set nahi hua (%s) — plain client.", e)
+            _ai_client = genai.Client(api_key=AI_API_KEY)
     return _ai_client
 
 
@@ -505,16 +527,45 @@ _AI_FATAL = ("api key", "api_key", "permission", "unauthenticated",
              "invalid argument", "not found", "400", "403", "401")
 
 
-def _ai_retryable(e) -> bool:
+# Model ko thodi der ke liye skip karne ke liye: agar us model ka id galat
+# hai, key/permission fail hai, to use dobara try karna sirf waqt barbaad
+# karta hai. 10 min baad khud wapas try hota hai.
+_AI_DEAD: dict = {}
+_AI_DEAD_TTL = 600
+
+
+def _ai_fatal(e) -> bool:
+    """Ye error dobara try karne layak nahi? Sirf fatal par model skip hota
+    hai — timeout / 429 / network par nahi (wo dobara try hone chahiye)."""
     s = str(e).lower()
-    if any(h in s for h in _AI_FATAL):
-        return False
-    return any(h in s for h in _AI_RETRYABLE)
+    return any(h in s for h in _AI_FATAL)
+
+
+def _mark_model_dead(model) -> None:
+    _AI_DEAD[str(model)] = time.time() + _AI_DEAD_TTL
+    log.warning("AI model skip (%s min): %s", _AI_DEAD_TTL // 60, model)
+
+
+def _live_chain() -> list:
+    """Chain se wo models hata do jo fatal error de chuke hain.
+
+    Sab dead ho jayein to POORI chain wapas — warna user ko sirf "busy"
+    milega, jabki shayad ab key theek ho chuki ho."""
+    now = time.time()
+    for m, until in list(_AI_DEAD.items()):
+        if until <= now:
+            _AI_DEAD.pop(m, None)
+    chain = [m for m in AI_MODELS if m] or [AI_MODEL]
+    live = [m for m in chain if m not in _AI_DEAD]
+    return live or chain
 
 
 # AI ki asli haalat — /diag me dikhti hai. "Kabhi jawab nahi aata" jaisi
 # shikayat ka koi saboot hi nahi tha, isliye ab counters hain.
-_ai_stats = {"calls": 0, "ok": 0, "fail": 0, "timeout": 0, "budget": 0, "rate": 0}
+_ai_stats = {"calls": 0, "ok": 0, "fail": 0, "timeout": 0, "budget": 0, "rate": 0,
+             "last_error": ""}
+# Kaunsa model kitni baar fail hua — /diag me dikhta hai.
+_ai_model_fails: dict = {}
 # Ek saath chalne wali AI requests (provider flood + memory se bachne ke liye).
 # Lazy banate hain: asyncio.Semaphore pehle await par event loop se bandh jata
 # hai, aur tests har case me naya loop banate hain — warna "bound to a different
@@ -811,7 +862,7 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     # -> Gemini 3.1 Flash Lite -> Gemini 3 Flash. Chain khatam ho to (time
     # bacha ho to) pehle model se dobara. Bounded: AI_MODEL_CYCLES passes +
     # AI_TOTAL_BUDGET. Bina hadd ke "dobara shuru" = infinite loop aur bill.
-    chain = [m for m in AI_MODELS if m] or [AI_MODEL]
+    chain = _live_chain()
     last_err = None
     _ai_stats["calls"] += 1
     deadline = time.monotonic() + max(1, AI_TOTAL_BUDGET)
@@ -820,25 +871,37 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
         if deadline - time.monotonic() <= 2:
             break
         if cycle:
+            # Owner ka rule: last model bhi fail ho to PEHLE model se dobara.
             log.info("AI chain: saare model fail — pehle se dobara (pass %s/%s)",
                      cycle + 1, AI_MODEL_CYCLES)
             await asyncio.sleep(min(0.4 * cycle + random.random() * 0.3, 2))
+        # Har pass ko apna hissa do. Warna pehla pass poora budget kha jata
+        # hai aur "wapas 1 se shuru" wala restart kabhi chalta hi nahi.
+        passes_left = max(1, AI_MODEL_CYCLES - cycle)
+        pass_deadline = time.monotonic() + max(
+            4.0, (deadline - time.monotonic()) / passes_left)
         for mi, model in enumerate(chain):
-            left = deadline - time.monotonic()
+            left = min(deadline, pass_deadline) - time.monotonic()
             if left <= 2:
                 break
-            # Bacha hua waqt baaki models me BAANT do. Pehle har koshish ko
-            # poora AI_TIMEOUT (45s) milta tha, isliye ek atka hua model
-            # poora budget kha jata tha aur user 45s tak kuch nahi sunta tha.
             remaining = max(1, len(chain) - mi)
-            per_try = max(3.0, min(float(AI_TIMEOUT), left / remaining))
+            # Pass ka waqt bache hue models me BARABAR baanto, taaki ek atka
+            # model poora waqt na kha jaye aur baaki models ko mauka hi na
+            # mile (pehle har koshish ko poora 45s milta tha -> ek hang ne
+            # poora chain kha liya). 8s floor: isse kam me koi model jawab
+            # nahi de payega.
+            per_try = max(8.0, min(float(AI_TIMEOUT), left / remaining))
+            # Floor kabhi bache hue waqt se bada na ho, warna ek koshish
+            # deadline ke baad bhi chalti rehti hai (total wait badh jata hai).
+            per_try = max(2.0, min(per_try, left))
             attempt += 1
             try:
                 # ZAROORI ("jawab kabhi aata nahi"): har koshish ka apna
                 # deadline, aur semaphore se ek saath chalti requests bounded.
                 async with _ai_limiter():
                     text = await asyncio.wait_for(
-                        asyncio.to_thread(_run_ai, model, prompt, history),
+                        asyncio.get_running_loop().run_in_executor(
+                            _AI_POOL, _run_ai, model, prompt, history),
                         timeout=per_try)
                 if text:
                     text = _strip_md(text)      # markdown hatao (* aur ` )
@@ -865,16 +928,24 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
             except asyncio.TimeoutError:
                 _ai_stats["timeout"] += 1
                 last_err = f"timeout after {per_try:.0f}s"
+                _ai_stats["last_error"] = f"{model}: {last_err}"
                 log.warning("AI timeout (model=%s #%s, %.0fs) — agla model",
                             model, attempt, per_try)
                 continue
             except Exception as e:
                 last_err = e
+                _ai_model_fails[str(model)] = _ai_model_fails.get(str(model), 0) + 1
+                _ai_stats["last_error"] = f"{model}: {str(e)[:150]}"
                 log.warning("AI fail (model=%s #%s): %s", model, attempt, e)
                 low = str(e).lower()
                 if "thinking" in low:
                     # Provider ne level reject kiya -> config theek karo, agla.
                     _disable_thinking(model)
+                    continue
+                if _ai_fatal(e):
+                    # Galat key / galat model id / permission — ise dobara
+                    # try karna sirf waqt barbaad karega. Agla model turant.
+                    _mark_model_dead(model)
                     continue
                 # Chain me har koshish DOOSRA model hai, isliye yahan backoff
                 # nahi — sirf agla model try karo. (Pehle har fail par 1-3s
@@ -882,7 +953,9 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                 # karta tha.) Backoff sirf naye pass ki shuruaat me.
                 continue
     _ai_stats["fail"] += 1
-    log.error("AI poora fail: %s", last_err)
+    _ai_stats["last_error"] = str(last_err or "no model answered")[:180]
+    log.error("AI poora fail (%s models, %s attempts): %s",
+              len(chain), attempt, last_err)
     # User ko kabhi provider ka naam nahi dikhna chahiye.
     return busy_message()
 
@@ -2766,6 +2839,13 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('ai calls')} : {bd(str(_ai_stats['calls']))} "
            f"({sc('ok')} {_ai_stats['ok']}, {sc('fail')} {_ai_stats['fail']}, "
            f"{sc('timeout')} {_ai_stats['timeout']})",
+           f"{sc('ai models')} : {bd(str(len(_live_chain())))}/{len(AI_MODELS)} "
+           f"{sc('live')}" + (f" · {sc('skipped')}: "
+                              + ", ".join(sorted(_AI_DEAD)) if _AI_DEAD else ""),
+           f"{sc('model fails')} : " + (", ".join(
+               f"{m} x{n}" for m, n in sorted(_ai_model_fails.items(),
+                                              key=lambda kv: -kv[1])[:4]) or "-"),
+           f"{sc('last ai error')} : {(_ai_stats.get('last_error') or '-')[:150]}",
            f"{sc('ai skipped')} : {sc('rate')} {_ai_stats['rate']}, "
            f"{sc('budget')} {_ai_stats['budget']}",
            sep, ""]
@@ -5013,7 +5093,8 @@ async def _vision_read(context, file_id, prompt) -> str:
     try:
         f = await context.bot.get_file(file_id)
         data = bytes(await f.download_as_bytearray())
-        txt = await asyncio.to_thread(_run_ai_vision, data, prompt)
+        txt = await asyncio.get_running_loop().run_in_executor(
+            _AI_POOL, _run_ai_vision, data, prompt)
         return _strip_md(txt)
     except Exception as e:
         log.warning("Vision fail: %s", e)

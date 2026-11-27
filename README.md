@@ -256,9 +256,11 @@ Duplicate input is also handled below the webhook: a button tapped twice runs it
 
 ## AI replies
 
-Every provider call has a deadline (`AI_TIMEOUT`, default 15 s), and the remaining budget
-(`AI_TOTAL_BUDGET`, default 30 s) is split across the models still left in the chain, so one stuck
-model can never eat the whole wait. On timeout or a retryable error the
+Every provider call has a deadline (`AI_TIMEOUT`, default 30 s). The chain's budget
+(`AI_TOTAL_BUDGET`, default 80 s) is split per pass and then across the models left in that pass, so
+one stuck model can never eat the whole wait, and the restart from model one still gets its own
+slice. A model that fails with a fatal error (bad key, unknown model id, permission) is skipped for
+10 minutes instead of being retried on every message. On timeout or a retryable error the
 fallback model is tried; if both fail the user still gets a message instead of silence. Concurrency is
 capped (`AI_CONCURRENCY`), the "typing…" indicator stays alive for the whole wait, and a rate-limit or
 budget refusal is announced once per `AI_NOTICE_COOLDOWN` rather than swallowed. `/diag` shows the

@@ -175,9 +175,9 @@ AI_MODELS = [x.strip() for x in os.getenv(
     "gemini-3.1-flash-lite,gemini-3-flash",
 ).split(",") if x.strip()]
 try:
-    AI_MODEL_CYCLES = max(1, int(os.getenv("AI_MODEL_CYCLES", "1")))
+    AI_MODEL_CYCLES = max(1, int(os.getenv("AI_MODEL_CYCLES", "2")))
 except ValueError:
-    AI_MODEL_CYCLES = 1
+    AI_MODEL_CYCLES = 2
 # Vision / ep-line jaise single-shot kaam ke liye (chain ka best Gemini)
 AI_MODEL = os.getenv("AI_MODEL") or os.getenv("GEMINI_MODEL") or AI_MODELS[-1]
 AI_MODEL_LITE = os.getenv("AI_MODEL_LITE") or AI_MODELS[0]
@@ -591,11 +591,11 @@ AI_GROUP_DAILY_MAX = _int_env("AI_GROUP_DAILY_MAX", 400)
 # Ek AI call par maximum kitni der intezaar karein. Iske baad agla model
 # try hota hai — pehle koi timeout hi nahi tha, to atki hui request par
 # user ko KABHI jawab nahi milta tha.
-AI_TIMEOUT = _int_env("AI_TIMEOUT", 15)
+AI_TIMEOUT = _int_env("AI_TIMEOUT", 30)
 # POORA jawab dene ka total deadline (seconds). 2 model x 2 koshish hone par
 # bhi user ko isse zyada intezaar nahi karna padta — pehle worst case 2-3
 # minute tha aur tab tak user chala jaata tha.
-AI_TOTAL_BUDGET = _int_env("AI_TOTAL_BUDGET", 30)
+AI_TOTAL_BUDGET = _int_env("AI_TOTAL_BUDGET", 100)
 # Ek saath kitni AI requests chal sakti hain (provider ko flood na karein).
 AI_CONCURRENCY = _int_env("AI_CONCURRENCY", 6)
 # "typing…" indicator kitni der me dobara bhejein (Telegram 5s me hata deta hai).
