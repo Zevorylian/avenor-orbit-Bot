@@ -6,6 +6,7 @@ tracked deep link, and keeps its state in MongoDB so nothing is lost on redeploy
 
 - **Bot:** [@MahiruOrbitBot](https://t.me/MahiruOrbitBot)  ·  Mahiru is the bot's name
 - **Channel:** [Avenor Feed](https://t.me/AvenorFeed)
+- **Lab:** [Avenor Lab](https://t.me/AvenorLab)
 - **Group:** [Avenor Club](https://t.me/AvenorClub)
 - **Repository:** [github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot)
 - **Developer:** [Deepak](https://github.com/Zevorylian) · [X](https://x.com/Zevorylian) · [Reddit](https://www.reddit.com/u/Zevorylian)

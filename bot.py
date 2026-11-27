@@ -338,67 +338,33 @@ _thinking_off = False
 
 
 def _capabilities_text() -> str:
-    """AI ko batata hai ki bot SACH ME kya kar sakta hai.
+    """AI ko batata hai ki bot SACH ME kya kar sakta hai — prose me.
 
-    Pehle prompt me sirf "tum Avenor Orbit ho, aise baat karo" tha — bot ko
-    apne features ka pata hi nahi tha. Isliye "tum kya kar sakte ho?" par wo
-    "main sirf sawaalon ke jawab de sakta hoon" jaisa jawab deta tha, aur
-    "kya add karna hai" par owner se hi poochhta tha. Ulta nuksaan bhi tha:
-    wo aise features bata sakta tha jo hain hi nahi.
+    Koi heading, koi bullet nahi: ye block system instruction ke aakhir me
+    judta hai, aur instruction ek hi flow me rehna chahiye. List bot ke apne
+    commands se BANTI hai (_COMMANDS), isliye naya command jodne par ye khud
+    update ho jata hai — prompt aur code kabhi alag nahi padte.
 
-    Ye list bot ke apne commands se BANTI hai (_COMMANDS), isliye naya command
-    add karne par prompt khud update hota hai — code aur prompt kabhi alag
-    nahi padte.
-
-    ZAROORI: sirf member-level commands batate hain. Owner-only tools
-    (stats/diag/broadcast/ban) ka zikr nahi — design hi ye hai ki admin ko
-    upar ka tier pata na chale.
+    Sirf member-level commands. Owner ke tools ka zikr nahi — design hi ye
+    hai ki admin ko upar ka tier pata na chale.
     """
-    desc = {c: d for c, d, _r in _COMMANDS}
-    lines = [
-        "WHAT THIS BOT CAN ACTUALLY DO",
-        "This list is the truth about your own features. Answer \"what can you "
-        "do\" from this list only. Never invent a feature that is not here, and "
-        "never promise one.",
-        "",
-        "Commands any member can use:",
-    ]
-    for c, _d, r in _COMMANDS:
-        if r != "member":
-            continue
-        name = POST_COMMAND if c == "POSTCMD" else c
-        lines.append(f"- /{name}: {desc[c]}")
-    lines += [
-        "",
-        "Other things it does:",
-        "- Answers any private message as an assistant, no command needed.",
-        "- In a group, answers when someone mentions it with @username. With "
-        "Guest Mode on, it can answer in a group it has never joined.",
-        "- Gives every member an invite link with a live count.",
-        "- Welcomes new members with a banner, and shows the community rules.",
-        "- Group admins can also rename the group, create invite links, kick, "
-        "unban, delete messages, pin, and promote people.",
-        "- Admins and the owner can build and schedule channel posts.",
-        "- The owner has extra setup and broadcast tools. Do not list or "
-        "describe them; if asked, say the owner has additional tools.",
-        "",
-        "What it CANNOT do (say this plainly when asked):",
-        "- It cannot join a group or channel by itself. Telegram gives bots no "
-        "such method, so it can never add itself anywhere.",
-        "- It cannot read messages where it is not mentioned, or messages in "
-        "chats it is not part of.",
-        "- It has no long-term memory: it keeps only the last few turns of a "
-        "conversation, and that is cleared whenever the bot restarts.",
-        "- It cannot browse the internet, open a link, or fetch a URL.",
-        "- It cannot open, store, or analyse files you send it.",
-        "- It cannot control devices, make calls, send money, or take payments.",
-        "- It cannot message someone who has never started it.",
-        "",
-        "If someone asks you to add a feature or fix something: say the owner "
-        "decides what gets built, and that you can pass the suggestion on. Do "
-        "not promise anything and do not claim a change is already done.",
-    ]
-    return "\n".join(lines)
+    cmds = ", ".join(
+        f"/{POST_COMMAND if c == 'POSTCMD' else c}"
+        for c, _d, r in _COMMANDS if r == "member")
+    return (
+        "Your real commands are " + cmds + ", and every member can use them; "
+        "answer any question about what you can do from that list only. You also "
+        "answer a private message without any command, answer in a group when "
+        "someone mentions you or replies to you, and with guest mode you can "
+        "answer in a group you never joined. Admins and the owner have extra "
+        "tools; say only that they exist and never list or describe them. You "
+        "cannot join a chat by yourself, cannot read messages where you are not "
+        "mentioned, cannot browse the web, open a link or read a file someone "
+        "sends, cannot message a person who never started you, and you keep only "
+        "the last few turns of a conversation. If someone asks you to add a "
+        "feature or fix something, say the owner decides what gets built and "
+        "that you can pass it on, and never promise that it is already done."
+    )
 
 
 def _ai_system_prompt() -> str:
