@@ -722,8 +722,8 @@ DEFAULT_PRIVACY_TEXT = (
     "below / on the bot's profile), so it stays in one place and cannot go "
     "out of date here.\n\n"
     "Contact\n"
-    "Questions or a deletion request for group data: message the bot owner "
-    "or the community at {community}.\n"
+    "Questions or a deletion request: message the bot owner, or ask in "
+    "{community}.\n"
 )
 
 

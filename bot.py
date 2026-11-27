@@ -689,10 +689,7 @@ def _ai_link() -> str:
     block config me kabhi tha hi nahi, isliye user ko literally
     "talk to the AI directly (AI)" dikhta tha (audit F-06).
     """
-    blk = next((b for b in LINK_BLOCKS
-                if b["name"].strip().lower() in ("ai", "ai bot")), None)
-    if blk:
-        return blk["url"]
+    # Config me "ai" naam ka block kabhi tha hi nahi — wo lookup dead tha.
     return AI_BOT_LINK or CHANNEL_LINK or "AI"
 
 
@@ -6206,17 +6203,34 @@ async def _do_delete_user_data(uid) -> dict:
     return res
 
 
-async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/privacy — kaun sa data rakha hai, kahan jaata hai, kaise delete ho."""
+def _privacy_text() -> str:
+    """`/privacy` ka poora text, placeholders bhare hue.
+
+    PEHLE yahan group ka link block ke NAAM se dhoondha jaata tha
+    ("community" substring). Jab block ka naam Avenor AI Community se
+    Avenor Club hua, matching khaali ho gayi aur /privacy me chhap gaya:
+    "…message the bot owner or the community at ." — link gayab.
+    Ab link config se aata hai aur naam usi block se, URL match karke.
+    """
     text = PRIVACY_TEXT or DEFAULT_PRIVACY_TEXT
-    community = next((b["url"] for b in LINK_BLOCKS
-                      if "community" in str(b.get("name", "")).lower()), "")
+    if COMMUNITY_LINK:
+        _name = next((b.get("name") for b in LINK_BLOCKS
+                      if str(b.get("url") or "") == COMMUNITY_LINK), "")
+        community = f"{_name or 'our group'} ({COMMUNITY_LINK})"
+    else:
+        community = "our group"
     text = (text.replace("{cache_days}", str(CACHE_RETENTION_DAYS))
                 .replace("{community}", community)
                 .replace("{privacy_url}", PRIVACY_URL or "")
                 .replace("{bot}", BOT_USERNAME))
     if PRIVACY_URL:
         text += f"\n\nFull policy: {PRIVACY_URL}"
+    return text
+
+
+async def cmd_privacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/privacy — kaun sa data rakha hai, kahan jaata hai, kaise delete ho."""
+    text = _privacy_text()
     # Command ka naam yahan NAHI likhte (user ne kaha: kahin advertise na ho).
     # Poora policy + deletion ka tareeka PRIVACY.md (GitHub) par hai.
     if not PRIVACY_URL:
