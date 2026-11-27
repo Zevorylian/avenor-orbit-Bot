@@ -52,7 +52,7 @@ import os
 import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bson import BSON
@@ -224,12 +224,18 @@ def backoff_delay(attempt: int, cap: int | None = None) -> float:
 _db_cache = None
 
 
+# Bot IST par chalta hai (owner bhi IST me hai). Pehle ye UTC me the, isliye
+# 00:00-05:30 IST ke beech join hone wale ka "joined" din pichhla dikhta tha,
+# aur AI ka roz ka quota 05:30 IST par reset hota tha.
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def _now():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return datetime.now(_IST).strftime("%Y-%m-%d %H:%M IST")
 
 
 def _today():
-    return datetime.now(timezone.utc).strftime("%d %b %Y")
+    return datetime.now(_IST).strftime("%d %b %Y")
 
 
 def db_default() -> dict:
@@ -1366,7 +1372,7 @@ def db_save_member_count(chat_id, count, keep_days=30) -> None:
         d = db_load()
         g = d.setdefault("growth", {})
         per = g.setdefault(str(chat_id), {})
-        per[datetime.now(timezone.utc).strftime("%Y-%m-%d")] = int(count)
+        per[datetime.now(_IST).strftime("%Y-%m-%d")] = int(count)
         # purane din gira do (doc bound rehta hai)
         if len(per) > max(2, keep_days):
             for k in sorted(per)[: len(per) - max(2, keep_days)]:
@@ -1644,7 +1650,7 @@ def audit_tail(n: int = 20) -> list:
 #  AI USAGE LEDGER  (global + per-group daily budget)
 # =====================================================================
 def _today_key() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(_IST).strftime("%Y-%m-%d")
 
 
 def ai_usage() -> dict:
@@ -1831,10 +1837,18 @@ def purge_stale(cache_days: int = 30, user_days: int = 0) -> dict:
             users = d.setdefault("users", {})
             for k in list(users.keys()):
                 stamp = str(users[k].get("last_seen") or "")
-                try:
-                    ts = datetime.strptime(stamp, "%Y-%m-%d %H:%M UTC").replace(
-                        tzinfo=timezone.utc).timestamp()
-                except Exception:
+                # Do format: purane records "UTC" me, naye "IST" me. Ek hi
+                # format padhne se purge chup-chaap band ho jata tha.
+                ts = None
+                for _fmt, _tz in (("%Y-%m-%d %H:%M IST", _IST),
+                                  ("%Y-%m-%d %H:%M UTC", timezone.utc)):
+                    try:
+                        ts = datetime.strptime(stamp, _fmt).replace(
+                            tzinfo=_tz).timestamp()
+                        break
+                    except ValueError:
+                        continue
+                if ts is None:
                     continue
                 if ts < cut:
                     users.pop(k, None)

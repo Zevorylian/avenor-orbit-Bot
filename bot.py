@@ -743,25 +743,37 @@ def _mark_invited(uid) -> None:
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
-def _now_context() -> str:
-    """'it is 2:14 AM on Tuesday (late night, IST)'.
+def _day_part(h: int) -> str:
+    """24-hour clock se din ka hissa. 4 baje dopahar ko 'raat' nahi kehna."""
+    if h < 5:
+        return "late night"
+    if h < 8:
+        return "early morning"
+    if h < 12:
+        return "morning"
+    if h < 17:
+        return "afternoon"
+    if h < 21:
+        return "evening"
+    return "night"
 
-    Mahiru ki bio hi waqt ke baare me hai ("noon, midnight, 2am — the door
-    doesn't lock"). Isliye har message ke saath asli waqt bhejte hain, warna
-    wo raat 3 baje bhi "good morning" bol sakti hai.
+
+def _now_context() -> str:
+    """'the local time ... is 4:03 PM on Wednesday (afternoon, IST)'.
+
+    PEHLE 07:00-22:00 ke beech waqt BHEJA HI NAHI jaata tha. Model ke paas
+    hour hi nahi hota tha, isliye wo apne aap se maan leta tha — 4:03 PM par
+    "itni raat ko? thodi der baith sakte hain" (screenshot). Ab har message
+    par asli waqt jaata hai, aur line usi me kehti hai ki dusra hour mat bolo.
+    Prompt waqt ko background maanta hai, topic nahi — isliye ye loop nahi
+    banata.
     """
     now = datetime.now(_IST)
-    h = now.hour
-    # Din me waqt NAHI bhejte. Pehle har message ke saath "it is 1:04 PM
-    # (afternoon)" jaata tha, aur bot har baar "dopahar kaisi chal rahi hai?"
-    # poochh leti thi — screenshots me wahi loop tha. Insaan dopahar 1 baje
-    # waqt ka zikr nahi karta; 2am ka karta hai.
-    if 7 <= h < 22:
-        return ""
-    part = "late night" if h < 5 else "early morning"
     clock = now.strftime("%I:%M %p").lstrip("0")
-    return (f"it is {clock} on {now.strftime('%A')} ({part}, IST) for the "
-            f"person you are talking to")
+    return (f"the local time for the person you are talking to is {clock} on "
+            f"{now.strftime('%A')} ({_day_part(now.hour)}, IST). Use it only if "
+            f"it is worth mentioning, and never state a different hour or time "
+            f"of day than this")
 
 
 _DEV_RX = re.compile(r"[\u0900-\u097F]")
@@ -1775,6 +1787,7 @@ _COMMANDS = [
     ("report",   "report a message to the admins",     "member"),
     ("ref",      "your invite link and count",         "member"),
     ("privacy",  "what data is stored, and how to erase it", "member"),
+    ("delete_my_data", "erase everything stored about you", "member"),
     ("admins",     "list the team",                    "owner"),
     ("settitle",   "rename this group",                "owner"),
     ("invitelink", "create an invite link",            "owner"),
@@ -6492,7 +6505,7 @@ async def cmd_backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(path, "rb") as f:
             await context.bot.send_document(
                 update.effective_chat.id, document=f,
-                filename=f"mahiru-backup-{datetime.now().strftime('%Y%m%d-%H%M')}.json",
+                filename=f"mahiru-backup-{datetime.now(_IST).strftime('%Y%m%d-%H%M')}.json",
                 caption=sc("full database backup"))
     except Exception as e:
         await update.effective_message.reply_text(f"failed — {_err_hint(e)}")
