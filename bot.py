@@ -482,6 +482,42 @@ def _hist_add(mem_key, role, text):
     _prune(_history, _HISTORY_CHATS)
 
 
+# Emoji ko insaan jaisa rakho. Research: 6.06 billion messages ke ek keyboard
+# dataset me sirf 7.1% messages me kam se kam ek emoji tha (Lu et al., 2016),
+# aur do message lagatar emoji ke saath almost nahi hote.
+_EMOJI_RX = re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u2764]")
+
+
+def _limit_emoji(text, mem_key=None) -> str:
+    """Reply me emoji ko rare rakho.
+
+    • pichhle do replies me emoji tha -> is baar hata do (lagatar nahi)
+    • ek message me ek se zyada -> sirf pehla rakho
+    """
+    if not text:
+        return text
+    found = _EMOJI_RX.findall(text)
+    if not found:
+        return text
+    hist = _hist(mem_key) if mem_key is not None else []
+    prev = [t for r, t in hist[-4:] if r == "model"][-2:]
+    if any(_EMOJI_RX.search(t or "") for t in prev):
+        cleaned = _EMOJI_RX.sub("", text)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+        return cleaned.strip()
+    if len(found) > 1:
+        out, seen = [], False
+        for ch in text:
+            if _EMOJI_RX.match(ch):
+                if seen:
+                    continue
+                seen = True
+            out.append(ch)
+        return re.sub(r"[ \t]{2,}", " ", "".join(out)).strip()
+    return text
+
+
 _MD_PAIRS = [
     (re.compile(r"\*\*(.+?)\*\*", re.S), r"\1"),
     (re.compile(r"~~(.+?)~~", re.S), r"\1"),
@@ -758,22 +794,32 @@ def _day_part(h: int) -> str:
     return "night"
 
 
-def _now_context() -> str:
-    """'the local time ... is 4:03 PM on Wednesday (afternoon, IST)'.
+# User ne waqt poocha? (sirf tab clock bhejte hain)
+_TIME_ASK_RX = re.compile(
+    r"\b(time|waqt|samay|clock|baje|baj[ae]|kitne baje|kya baja)\b", re.I)
 
-    PEHLE 07:00-22:00 ke beech waqt BHEJA HI NAHI jaata tha. Model ke paas
-    hour hi nahi hota tha, isliye wo apne aap se maan leta tha — 4:03 PM par
-    "itni raat ko? thodi der baith sakte hain" (screenshot). Ab har message
-    par asli waqt jaata hai, aur line usi me kehti hai ki dusra hour mat bolo.
-    Prompt waqt ko background maanta hai, topic nahi — isliye ye loop nahi
-    banata.
+
+def _now_context(user_text: str = "") -> str:
+    """Background me sirf din ka hissa — CLOCK sirf jab user ne poocha ho.
+
+    Do galtiyan ho chuki hain is line me:
+      1) pehle 07:00-22:00 ke beech waqt bheja hi nahi jaata tha -> 4 PM par
+         bot ne apne aap "itni raat ko?" maan liya (screenshot 1).
+      2) phir har message par poora clock bheja -> bot ne jawab me hi dohra
+         diya: "it is 4 pm and the room feels a bit too quiet" (screenshot 2).
+    Insaan clock nahi bolta. Ab digits sirf tab jaate hain jab user poochhe;
+    warna sirf "afternoon on Friday" — jisse na raat invent hogi, na "4 pm"
+    likha ja sakega.
     """
     now = datetime.now(_IST)
-    clock = now.strftime("%I:%M %p").lstrip("0")
-    return (f"the local time for the person you are talking to is {clock} on "
-            f"{now.strftime('%A')} ({_day_part(now.hour)}, IST). Use it only if "
-            f"it is worth mentioning, and never state a different hour or time "
-            f"of day than this")
+    part = _day_part(now.hour)
+    day = now.strftime("%A")
+    if user_text and _TIME_ASK_RX.search(str(user_text)):
+        clock = now.strftime("%I:%M %p").lstrip("0")
+        return (f"they asked about the time: it is {clock} on {day} ({part}, "
+                f"IST). Answer once, plainly, and do not repeat it")
+    return (f"it is {part} on {day} where they are. Background only — never "
+            f"mention the time, the hour or the day unless they ask")
 
 
 _DEV_RX = re.compile(r"[\u0900-\u097F]")
@@ -839,15 +885,19 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
     bits = []
     if where:
         bits.append(f"you are in {where}")
-    now_bit = _now_context()
+    now_bit = _now_context(raw)
     if now_bit:
         bits.append(now_bit)
     lang = _lang_hint(raw)
     if lang:
         bits.append(lang)
+    # Naam har message par NAHI. 1:1 text messages ke corpus me sirf 13.6%
+    # messages me naam/vocative hota hai (Asprey & Tagg, 412 messages), aur wo
+    # bhi greeting me. Isliye naam sirf session ke shuru me bhejte hain.
     _nm = str(name or "").strip().replace('"', "").replace("\n", " ")[:32]
-    if _nm:
-        bits.append(f"their name is {_nm} — use it rarely, not in every message")
+    if _nm and (gap_h is None or gap_h >= 6):
+        bits.append(f"their name is {_nm} — a greeting at most, never a tag "
+                    f"after a question")
     if gap_h is not None and GAP_NOTICE_HOURS > 0 and gap_h >= GAP_NOTICE_HOURS:
         bits.append(f"they were away for about {int(round(gap_h))} hour(s) — you "
                     f"may notice it once, casually, only if it fits")
@@ -920,6 +970,7 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                         timeout=per_try)
                 if text:
                     text = _strip_md(text)      # markdown hatao (* aur ` )
+                    text = _limit_emoji(text, mem_key)
                     if len(text) > AI_MAX_CHARS:
                         text = text[: AI_MAX_CHARS - 20].rstrip() + "\n\n… (shortened)"
                     if mem_key is not None:
