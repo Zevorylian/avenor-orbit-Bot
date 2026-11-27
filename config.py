@@ -815,8 +815,10 @@ JOIN_BUTTON_TEXT = os.getenv("JOIN_BUTTON_TEXT", "Request to Join")
 # sahi nahi lagta (supergroup id -100… se shuru hoti hai). Owner se confirm
 # hone ke baad /gate add se jod dena.
 GATE_CHANNELS = [
-    {"name": "Avenor Feed", "id": "@AvenorFeed",
-     "url": "https://t.me/AvenorFeed"},
+    # Force-join ka pehla channel = Avenor Lab (owner ne yahi bola).
+    # Post ka target alag hai (POST_CHANNELS = Feed + Club) — dono ko mix na karo.
+    {"name": "Avenor Lab", "id": "@AvenorLab",
+     "url": "https://t.me/AvenorLab"},
     {"name": "ANIME WORLD", "id": -1002549849997,
      "url": "https://t.me/c/2549849997"},
     {"name": "ANIME NEWS", "id": -1003910002446,
