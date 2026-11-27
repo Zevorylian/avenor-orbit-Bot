@@ -5,8 +5,8 @@ moderates members, answers questions as an AI assistant, builds and schedules ch
 tracked deep link, and keeps its state in MongoDB so nothing is lost on redeploy.
 
 - **Bot:** [@MahiruOrbitBot](https://t.me/MahiruOrbitBot)  ·  Mahiru is the bot's name
-- **Channel:** [Avenor Apps AI](https://t.me/AvenorAppsAI)
-- **Group:** [Avenor AI Community](https://t.me/AvenorAICommunity)
+- **Channel:** [Avenor Lab](https://t.me/AvenorLab)
+- **Group:** [Avenor Club](https://t.me/AvenorClub)
 - **Repository:** [github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot)
 - **Developer:** [Deepak](https://github.com/Zevorylian) · [X](https://x.com/Zevorylian) · [Reddit](https://www.reddit.com/u/Zevorylian)
 

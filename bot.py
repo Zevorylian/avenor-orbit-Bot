@@ -1333,7 +1333,7 @@ def _post_only_username(chat) -> bool:
 
     Audit F-05: dono taraf case ko lowercase karo. Pehle candidate lowercase
     hota tha par block ids case-preserving the, isliye owner ke apne channel
-    ("@AvenorAppsAI") "post-only target" maan liye jaate the — learn_chat
+    ("@AvenorLab") "post-only target" maan liye jaate the — learn_chat
     skip ho jata tha aur /chats me nahi dikhte the.
     """
     uname = str(getattr(chat, "username", "") or "").strip().lower()
@@ -3362,12 +3362,12 @@ def _inline_results(context, query: str) -> list:
         "found her ☁",
         f"https://t.me/{bot_name}?start=src_inline", "say hi"))
     out.append(_art(
-        "channel", "Avenor Apps AI — channel",
+        "channel", "Avenor Lab — channel",
         "apps, AI tools and updates",
         "new apps and AI tools land here first.",
         CHANNEL_LINK, "open channel"))
     out.append(_art(
-        "group", "Avenor AI Community — group",
+        "group", "Avenor Club — group",
         "people talk here",
         "people talk here.",
         COMMUNITY_LINK, "open group"))
@@ -3581,7 +3581,7 @@ async def _ephemeral_welcome(context, chat, member) -> None:
     _u = getattr(context.bot, "username", None) or BOT_USERNAME
     rows = [[_btn("say hi to Mahiru",
                   url=f"https://t.me/{_u}?start=src_ephemeral")],
-            [_btn("Avenor Apps AI", url=CHANNEL_LINK)]]
+            [_btn("Avenor Lab", url=CHANNEL_LINK)]]
     name = (member.first_name or "you").strip()
     text = (f"hey {name} — welcome.\n\n"
             f"I am Mahiru. I live in this group - ask me anything here, or "
@@ -3643,8 +3643,8 @@ async def _join_welcome_dm(context, req, chat) -> None:
         return
     target = getattr(req, "user_chat_id", None) or usr.id
     name = (usr.first_name or "you").strip()
-    rows = [[_btn("Avenor Apps AI", url=CHANNEL_LINK)],
-            [_btn("Avenor AI Community", url=COMMUNITY_LINK)],
+    rows = [[_btn("Avenor Lab", url=CHANNEL_LINK)],
+            [_btn("Avenor Club", url=COMMUNITY_LINK)],
             [_btn("say hi to Mahiru",
                   url=f"https://t.me/{context.bot.username}?start=src_joinreq")]]
     text = (f"hey {name} — request mil gayi, andar aa sakte ho.\n\n"
@@ -3677,7 +3677,7 @@ def _first_admin_id() -> int:
 async def _notify_admin_join_request(context, chat, usr) -> None:
     """Private anime channel ki join request -> Admin 1 ko DM + 3 buttons.
 
-    Owner ke apne channel (Avenor) ke liye ye nahi chalta — wahan pehle jaisa
+    Owner ke apne channel (Avenor Lab) ke liye ye nahi chalta — wahan pehle jaisa
     auto-approve + welcome DM hi rehta hai.
     """
     target = _first_admin_id() or owner_id()
@@ -3857,8 +3857,8 @@ def _intro_kb(context) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [_btn("say hi to Mahiru",
               url=f"https://t.me/{_u}?start=src_intro", style="primary")],
-        [_btn("Avenor Apps AI", url=CHANNEL_LINK),
-         _btn("Avenor AI Community", url=COMMUNITY_LINK)],
+        [_btn("Avenor Lab", url=CHANNEL_LINK),
+         _btn("Avenor Club", url=COMMUNITY_LINK)],
     ])
 
 
@@ -4783,7 +4783,7 @@ def _as_url(v) -> str:
 
 def _norm_chat_id(x):
     """1001111111111 -> -1001111111111 (config me jo diya hai usko theek karo).
-    "@AvenorAppsAI" jaisa username waisa hi rehta hai — Telegram dono leta hai."""
+    "@AvenorLab" jaisa username waisa hi rehta hai — Telegram dono leta hai."""
     try:
         cid = int(x)
     except (TypeError, ValueError):

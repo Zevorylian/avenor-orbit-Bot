@@ -8,7 +8,7 @@ the `/privacy` command.
 
 Contact for any privacy request: the bot owner listed in the repository
 [github.com/Zevorylian/avenor-orbit-Bot](https://github.com/Zevorylian/avenor-orbit-Bot), or the community
-group [@AvenorAICommunity](https://t.me/AvenorAICommunity).
+group [@AvenorClub](https://t.me/AvenorClub).
 
 ---
 
