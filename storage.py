@@ -931,6 +931,49 @@ def db_set_chat_id(name, chat_id):
         _chat_ids_cache = dict(data["chat_ids"])
 
 
+# =====================================================================
+#  INSTANCES  — ek hi BOT_TOKEN par kitne bot chal rahe hain
+# =====================================================================
+_INSTANCE_TTL = 900          # 15 min tak ping na aaye = dead instance
+
+
+def db_instance_ping(instance_id: str, build: str = "", pid: int = 0) -> list:
+    """Apne aap ko register karo aur BAAKI live instances ki list do.
+
+    Ek hi token par do process chalna sabse confusing bugs banata hai: dono
+    updates lete hain, ek approve karta hai doosra nahi — bahar se lagta hai
+    "bot khud approve kar raha hai". Isliye startup par ye check hota hai.
+    """
+    now = time.time()
+    with _db_lock:
+        d = db_load()
+        inst = d.setdefault("instances", {})
+        for k in list(inst.keys()):
+            try:
+                if now - float(inst[k].get("seen") or 0) > _INSTANCE_TTL:
+                    inst.pop(k, None)
+            except (TypeError, ValueError, AttributeError):
+                inst.pop(k, None)
+        inst[instance_id] = {"seen": now, "build": str(build)[:40],
+                             "pid": int(pid or 0)}
+        db_save(d)
+        others = [dict(id=k, **v) for k, v in inst.items() if k != instance_id]
+    return others
+
+
+def db_instances() -> list:
+    """Abhi live instances (read-only)."""
+    now = time.time()
+    out = []
+    for k, v in (db_load().get("instances") or {}).items():
+        try:
+            if now - float(v.get("seen") or 0) <= _INSTANCE_TTL:
+                out.append(dict(id=k, **v))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
 def db_upsert_chat(chat_id, title, ctype, status=None):
     """Bot jis bhi chat me hai uski detail yaad rakho (id, title, type, status)."""
     with _db_lock:

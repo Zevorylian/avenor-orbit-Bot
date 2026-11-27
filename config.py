@@ -473,6 +473,12 @@ CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AvenorFeed")
 LAB_LINK = os.getenv("LAB_LINK", "https://t.me/AvenorLab")
 
 # ---- JOIN-REQUEST POLICY (do hi bucket) -------------------------------
+#  ⚠️ YAHAN ADMIN_CHANNELS KO JODNA MAT. Ye list sirf owner ke 3 rooms ke
+#  liye hai. Admin ke 5 anime channels (ADMIN_CHANNELS) KABHI auto-approve
+#  nahi hote — unki request seedha Admin 1 ke DM me jaati hai.
+#  bot.py me _never_auto_approve() + _join_policy_selftest() is rule ko
+#  startup par check karte hain, isliye galti se todne par log me ERROR
+#  aayega (aur owner ko DM).
 #   AUTO_APPROVE_CHANNELS -> request aayi, bot TURANT approve karta hai
 #   baaki HAR chat         -> approve NAHI hota; Admin 1 ko DM jaata hai
 #                             (Approve / Reject / Pending buttons)

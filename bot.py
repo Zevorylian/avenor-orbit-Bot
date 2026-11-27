@@ -1,23 +1,43 @@
 """
 =====================================================================
-  bot.py — AVENOR ORBIT (poora bot ek hi file mein)
+  bot.py — AVENOR ORBIT ka poora runtime (ek process, ek file)
 =====================================================================
-  Isme sab kuch hai:
-    • Database (users / referrals / ban)   -> section "DATABASE"
-    • AI wrapper                            -> section "AI"
-    • Telegram handlers + webhook server    -> baaki sab
+  FILE LAYOUT — kaunsi file kis kaam ki hai, aur kyun alag hai:
 
-  Sirf "config.py" edit karni hai. Is file ko chhedne ki zaroorat nahi.
+    bot.py      Telegram handlers, AI pipeline, post builder, join gate,
+                webhook server, saare commands. Yahan "kya hota hai" hai.
+                Database ka code isme nahi hai.
+    config.py   Sirf settings: channel ids, links, system prompt, limits.
+                Roz-marra ki tabdeeli yahin hoti hai — bot.py chhedna nahi padta.
+    storage.py  Persistence: Mongo + local JSON, users, referrals, gate links,
+                join requests, audit log, deletion. bot.py isse db_* functions
+                bulata hai; seedha file I/O kabhi nahi.
+    fonts.py    Unicode bold / small-caps (ParseMode ke bina styling).
+    roster.py   Optional MTProto member list (/members). Default OFF.
+
+  Files sirf responsibility ke hisaab se alag hain — bot ke behaviour par
+  koi asar nahi padta ki code ek file me hai ya paanch me.
+
+  ADMIN aur OWNER file nahi hain — ye ROLES hain (Telegram user ids):
+    owner = config OWNER_ID, ya ek baar /claim se set. Sab kuch chala sakta hai.
+    admin = ADMIN_IDS (env) ya /admin add se. Sirf post/link + halki moderation.
+  Dono EK hi bot process me chalte hain. Alag "admin bot" ya "owner bot"
+  banane ki zaroorat nahi: do bot = ek token par do process = dono updates
+  lete hain aur alag behave karte hain (yahi sabse confusing bugs banata hai,
+  jaise join request khud approve hona). Isliye startup par duplicate
+  instance check hota hai (db_instance_ping).
 
   Features:
-    1) Force-join gate (config.py ke LINK_BLOCKS se) + join requests auto-approve
+    1) Force-join gate — owner ke post par Club + Lab (+ plain bot link);
+       admin ke link par Lab + 5 anime. Join request: Feed/Club/Lab
+       auto-approve, anime sirf Admin 1 ke DM me (kabhi auto-approve nahi).
     2) Welcome message (photo + styled caption)
-    3) AI chat — DM mein, aur group mein sirf @mention par (membership check ke saath)
-    4) Referral / invite growth system
+    3) AI chat — DM me har message par, group me sirf @mention / reply par
+    4) Referral / invite growth
+    5) /post builder — owner: 5 categories, admin: sirf link
 
-  Text styling fonts.py se hoti hai (Unicode small-caps / bold) — isliye
-  ParseMode ki zaroorat nahi, aur naam mein "_" ya "*" hone par bhi
-  message fail nahi hota.
+  Text styling fonts.py se hoti hai — ParseMode ki zaroorat nahi, isliye
+  naam me "_" ya "*" hone par bhi message fail nahi hota.
 
   NOTE: bot apni identity (kaunse model par chalta hai) kabhi reveal nahi
   karta — wo AI_SYSTEM_PROMPT se handle hota hai.
@@ -293,6 +313,8 @@ from storage import (
     db_add_request,
     db_del_request,
     db_requests_all,
+    db_instance_ping,
+    db_instances,
     has_request,
     db_link_add,
     db_links,
@@ -1027,7 +1049,39 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
 
 
 # =====================================================================
-#  HELPERS
+#  ROLES — OWNER aur ADMIN (file NAHI, sirf Telegram ID hain)
+# =====================================================================
+#  OWNER  = bot ka malik. Set hota hai: config OWNER_ID (env), ya ek baar
+#           /claim se (DB me save). Owner ko force-join gate NAHI dikhta aur
+#           wo har command chala sakta hai (/stats, /diag, /broadcast, /ban…).
+#
+#  ADMIN  = team ka member. Set hota hai: ADMIN_IDS (env, comma-separated)
+#           ya /admin add <id> <naam> se (DB me). Admin sirf: /post (link
+#           banane ke liye), /posts, /del, /pin, /kick, /unkick, /admin panel.
+#           Owner ke channels aur owner-only tools admin ko dikhte hi nahi.
+#
+#  "admin.py" ya "owner.py" jaisi ALAG FILE KYUN NAHI HAI:
+#    • Role ek ID check hai (is_admin / is_owner), poora module nahi.
+#    • Ek bot = ek process = ek BOT_TOKEN. Do file/do bot banane par ek hi
+#      token par do process chal jaate hain, dono Telegram se wahi updates
+#      lete hain, aur alag behave karte hain (ek approve karta hai, doosra
+#      nahi) — bahar se lagta hai "bot khud approve kar raha hai".
+#      Isliye startup par duplicate-instance check hota hai (_instance_check).
+#    • Naya admin-only feature add karna ho to teen jagah:
+#        1) function ke shuru me: if not await _need(update): return
+#           (group ke liye) ya if not await _need_owner(update): return
+#        2) _COMMANDS me ("command", "description", "admin"/"owner") jodo
+#        3) chaho to _owner_actions() / admin panel me button jodo
+#      Bas. Nayi file ki zaroorat nahi.
+#
+#  JOIN-REQUEST POLICY (ise todna mat — _join_policy_selftest startup par
+#  check karta hai):
+#    • Avenor Feed / Club / Lab  -> join request TURANT approve
+#    • ADMIN_CHANNELS (5 anime)  -> KABHI approve nahi; sirf Admin 1 ke DM me
+#                                   Approve / Reject / Pending
+#    • Baaki koi bhi chat        -> approve nahi, Admin 1 ko DM (fail-closed)
+#  Yahan `AUTO_APPROVE_JOIN` sirf pehla bucket chalu/band karta hai; dusre
+#  bucket par iska koi asar nahi.
 # =====================================================================
 def is_admin(uid: int) -> bool:
     """Admin = env ADMIN_IDS + jo owner ne /admin se add kiye."""
@@ -1667,10 +1721,43 @@ async def _set_commands(app: Application):
             pass
 
 
+_INSTANCE_ID = secrets.token_hex(4)
+
+
+async def _instance_check(app) -> list:
+    """Ek hi token par doosra bot chal raha hai? (sabse confusing bugs ki jad)"""
+    try:
+        others = db_instance_ping(_INSTANCE_ID, BOT_BUILD, os.getpid())
+    except Exception as e:
+        log.warning("Instance check fail: %s", e)
+        return []
+    if others:
+        log.error("DOOSRA INSTANCE chal raha hai (same token): %s", others)
+        await _notify_owner(
+            app.bot,
+            "⚠️ Ek hi BOT_TOKEN par do bot chal rahe hain.\n"
+            f"ye instance: {_INSTANCE_ID}\n"
+            f"doosre: {[o.get('id') for o in others]}\n\n"
+            "Dono updates lenge aur alag behave karenge (jaise join request "
+            "khud approve hona). Render par sirf EK service chalao.")
+    else:
+        log.info("Instance %s: akele chal rahe hain.", _INSTANCE_ID)
+    return others
+
+
 async def verify_blocks_on_startup(app: Application):
     """Start par check: har enforced chat ki id hai? bot admin hai?
     Jo problem mile wo admin ko DM bhi bhejo — sirf log me chhodo mat."""
     log.info("Storage: %s", mongo_status())
+    await _instance_check(app)
+    _pol = _join_policy_selftest()
+    if _pol:
+        log.error("JOIN POLICY TOOTI HUI HAI: %s", _pol)
+        await _notify_owner(app.bot,
+                            "⚠️ Join-request policy toot gayi hai:\n"
+                            + "\n".join(_pol))
+    else:
+        log.info("Join policy OK — 5 anime: sirf Admin 1, Feed/Club/Lab: auto.")
     log.info("AUTO-APPROVE chats: %s", sorted(_auto_approve_keys()))
     log.info("NEVER auto-approve (admin, Admin 1 ko DM): %s",
              [n for n, _c in ADMIN_CHANNELS])
@@ -2945,6 +3032,8 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
            f"{sc('auto-approve')} : {', '.join(sorted(_auto_approve_keys())) or '-'}",
            f"{sc('never-approve')} : {', '.join(n for n, _c in ADMIN_CHANNELS)}",
+           f"{sc('instances')} : {len(db_instances())} {sc('live')} "
+           f"({sc('this')} {_INSTANCE_ID})",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
            f"{sc('roster')} : {bd('ready') if not roster.available() else roster.available()}",
            f"{sc('dm sent')} : {bd(str(_eph_stats['sent']))} "
@@ -3946,6 +4035,37 @@ def _never_auto_approve(chat) -> bool:
     return bool(title and title in _admin_chat_names())
 
 
+class _PolicyChat:
+    """Selftest ke liye chhota chat stub — Telegram object ki zaroorat nahi."""
+    def __init__(self, cid, title, username=None):
+        self.id = cid
+        self.title = title
+        self.username = username
+
+
+def _join_policy_selftest() -> list:
+    """JOIN POLICY KA LOCK — har startup par chalta hai.
+
+    Kyun: aage koi bhi (owner, main, ya koi aur AI/chatbot) naya feature
+    add karte waqt is rule ko galti se tod sakta hai. Us waqt bot chup-chaap
+    galat behave karne ke bajaye startup par ERROR deta hai aur owner ko DM
+    karta hai — taaki "auto approval phir aa gaya" ka chakkar khatam ho.
+    """
+    bad = []
+    for name, cid in ADMIN_CHANNELS:
+        ch = _PolicyChat(cid, name)
+        if not _never_auto_approve(ch):
+            bad.append(f"{name} ({cid}): deny-list me nahi hai")
+        if _is_auto_approve_chat(ch):
+            bad.append(f"{name} ({cid}): auto-approve list me aa gaya")
+    for b in LINK_BLOCKS:
+        ch = _PolicyChat(None, b.get("name") or "",
+                         str(b.get("id") or "").lstrip("@") or None)
+        if not _is_auto_approve_chat(ch):
+            bad.append(f"{b.get('name')}: auto-approve se nikal gaya")
+    return bad
+
+
 def _first_admin_id() -> int:
     """Admin 1 — pehla admin (env ADMIN_IDS, phir DB admins)."""
     ids = [int(a) for a in ADMIN_IDS] + [int(k) for k in db_admins()]
@@ -3978,6 +4098,18 @@ async def _notify_admin_join_request(context, chat, usr) -> None:
         log.info("Join request Admin %s ko bheji: %s (%s)", target, usr.id, chat.id)
 
 
+# =====================================================================
+#  JOIN REQUEST — YAHAN RULE MAT BADALNA (policy lock)
+# =====================================================================
+#  DO NOT CHANGE without a reason:
+#    1) _never_auto_approve(chat) SABSE PEHLE check hota hai — ADMIN_CHANNELS
+#       ke 5 anime chats kabhi approve nahi hote (id se aur naam se).
+#    2) Uske baad _is_auto_approve_chat(chat) — sirf Feed / Club / Lab.
+#    3) Baaki har chat -> Admin 1 ko DM (fail-closed).
+#    4) approve_chat_join_request se PEHLE phir se wahi check (final guard).
+#  Naya code add karte waqt in 4 line ko na hatao; _join_policy_selftest()
+#  startup par verify karta hai ki policy intact hai.
+# =====================================================================
 async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Join request aayi -> record, phir DM (agar on hai), phir approve.
 
