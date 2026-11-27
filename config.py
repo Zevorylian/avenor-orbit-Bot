@@ -833,6 +833,19 @@ GATE_CHANNELS = [
      "url": "https://t.me/c/4498955231"},
 ]
 
+# ---- OWNER POST GATE (halka gate) -------------------------------------
+# Owner ke /post se bane link par SIRF ye dikhte hain: Club + Lab (verify),
+# aur unke neeche ek plain bot link jiska koi verify nahi hota.
+# Admin ke link par poora GATE_CHANNELS (Lab + 5 anime) dikhta hai — wo alag
+# hai, dono ko mix na karo.
+OWNER_GATE_CHANNELS = [
+    {"name": "Avenor Club", "id": "@AvenorClub", "url": COMMUNITY_LINK},
+    {"name": "Avenor Lab", "id": "@AvenorLab", "url": LAB_LINK},
+]
+# Verify button ke upar wala plain link — membership check NAHI.
+POST_GATE_BOT_NAME = os.getenv("POST_GATE_BOT_NAME", "Avenor AI Bot")
+POST_GATE_BOT_LINK = os.getenv("POST_GATE_BOT_LINK", "https://t.me/AvenorAIBot")
+
 # ---- ADMIN ke channels (CODE me — Render env ki zaroorat nahi) ---------
 # Admin SIRF in channels me post kar sakta hai. Owner ke apne channel
 # (Avenor Feed / Avenor Club) admin ko dikhte hi nahi.

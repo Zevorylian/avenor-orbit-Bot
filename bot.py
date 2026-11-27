@@ -162,6 +162,9 @@ from config import (
     AI_MODEL_CYCLES,
     AI_BOT_LINK,
     CHANNEL_LINK,
+    OWNER_GATE_CHANNELS,
+    POST_GATE_BOT_NAME,
+    POST_GATE_BOT_LINK,
     AUTO_APPROVE_CHANNELS,
     AUTO_APPROVE_NAMES,
     INVITE_ENABLED,
@@ -1139,8 +1142,14 @@ def _is_tap_block(b) -> bool:
     return (b.get("verify") or "member") == "tap"
 
 
-def _gate_blocks() -> list:
+_gate_scope: dict = {}      # uid -> "owner" | "admin" (kaunsa gate dikha)
+
+
+def _gate_blocks(scope=None) -> list:
     """Force-join ke liye zaroori blocks.
+
+    scope="owner" -> owner ke post ka HALKA gate: Club + Lab (+ plain bot link,
+    jiska verify nahi). Baaki (admin link) -> poora GATE_CHANNELS.
 
     Do jagah se aate hain:
       1) config LINK_BLOCKS jinme require_join=True
@@ -1158,6 +1167,21 @@ def _gate_blocks() -> list:
         out.append(b)
 
     links = db_gate_links()
+
+    if scope == "owner":
+        # Do half-width buttons ek row me (Club | Lab), phir plain bot link.
+        for b in OWNER_GATE_CHANNELS:
+            if not (b.get("id") or b.get("url")):
+                continue
+            cid = b.get("id")
+            _add({**b, "url": links.get(str(cid)) or b.get("url"),
+                  "require_join": True, "row": 100})
+        if POST_GATE_BOT_LINK:
+            # require_join False -> verify me ginti nahi, sirf link button.
+            _add({"name": POST_GATE_BOT_NAME, "url": POST_GATE_BOT_LINK,
+                  "require_join": False, "row": 101})
+        return out
+
     # 1) config me permanent gate channels (owner ne ids di hain) — 2 per row
     for i, b in enumerate(GATE_CHANNELS):
         if not (b.get("id") or b.get("url")):
@@ -1178,13 +1202,13 @@ def _gate_blocks() -> list:
     return out
 
 
-def enforced_blocks():
+def enforced_blocks(scope=None):
     """Jo blocks force-join ke liye zaroori hain.
     "tap" wale blocks ki chat id nahi hoti — unhe bhi shamil karo, warna wo
     gate se chup-chaap bahar ho jaate."""
     learned = _learned_ids()
     out = []
-    for b in _gate_blocks():
+    for b in _gate_blocks(scope):
         if not b.get("require_join"):
             continue
         if _is_tap_block(b):
@@ -1284,14 +1308,16 @@ async def _is_member(context, chat_id, user_id, force=False):
     return ok
 
 
-def required_count(total=None) -> int:
+def required_count(scope=None, total=None) -> int:
     """Kitne channels join/request karna zaroori hai (MIN_JOINS_REQUIRED se).
     total=None -> config me jo bhi require_join: True blocks hain, WO SAARE.
     Pehle ye sirf VERIFIABLE blocks ginta tha (jin ki id ho) — isliye jin
     channels ki id nahi thi wo chup-chaap maaf ho jaate the aur "all" ka
     matlab 4 ke bajaye kam ho jata tha. (Asli bug.)"""
     if total is None:
-        total = len(_gate_blocks())
+        # Sirf require_join blocks — plain link buttons (jaise bot link) ginti
+        # me nahi aate, warna "sab join karo" ka matlab badal jata.
+        total = sum(1 for b in _gate_blocks(scope) if b.get("require_join"))
     if total <= 0:
         return 0
     val = str(MIN_JOINS_REQUIRED).strip().lower()
@@ -1303,19 +1329,19 @@ def required_count(total=None) -> int:
         return total
 
 
-def has_required_blocks() -> bool:
+def has_required_blocks(scope=None) -> bool:
     """config me koi bhi require_join block hai?"""
-    return bool(_gate_blocks())
+    return any(b.get("require_join") for b in _gate_blocks(scope))
 
 
-async def join_status(context, user_id, force=False):
+async def join_status(context, user_id, force=False, scope=None):
     """(joined, missing, unknown, need).
     unknown = jinhe check hi nahi kar paye (bot admin nahi / id galat).
     need SIRF un blocks par count hota hai jo sach me verify ho sake — isliye
     agar kuch bhi verify na ho to need 0, aur gate user ko block nahi karta.
     force=True -> cache ignore karo, fresh check (Check button ke liye)."""
     joined, missing, unknown = [], [], []
-    for chat in enforced_blocks():
+    for chat in enforced_blocks(scope):
         if _is_tap_block(chat):
             (joined if is_done(user_id, chat["name"]) else missing).append(chat)
             continue
@@ -1335,7 +1361,7 @@ async def join_status(context, user_id, force=False):
             unknown.append(chat)
     # need KUL require_join blocks par — sirf verifiable par nahi, warna
     # unverifiable blocks chup-chaap maaf ho jaate the.
-    need = required_count()
+    need = required_count(scope)
     return joined, missing, unknown, need
 
 
@@ -1361,14 +1387,15 @@ def gate_report():
     return ready, no_id
 
 
-async def needs_join(context, user_id, force=False) -> bool:
+async def needs_join(context, user_id, force=False, scope=None) -> bool:
     """User ko gate dikhana hai? SIRF OWNER ko nahi — admin aur member dono
     ko dikhta hai (owner ke paas sab pehle se hai, usko kuch join nahi karna)."""
     if is_owner(user_id):
         return False
-    if not has_required_blocks():
+    if not has_required_blocks(scope):
         return False
-    joined, _missing, _unknown, need = await join_status(context, user_id, force=force)
+    joined, _missing, _unknown, need = await join_status(
+        context, user_id, force=force, scope=scope)
     if need > 0:
         return len(joined) < need
     # Kuch bhi verify nahi ho paya (chat id nahi / bot admin nahi).
@@ -1534,7 +1561,7 @@ def _tap_done_names(user_id) -> list:
     return [b["name"] for b in LINK_BLOCKS if _is_tap_block(b) and is_done(user_id, b["name"])]
 
 
-async def _ensure_gate_links(context) -> int:
+async def _ensure_gate_links(context, scope=None) -> int:
     """Gate channels ke ASLI join link banao (invite link), ek hi baar.
 
     Zaroori kyun: private channel ka `t.me/c/...` link sirf member ke liye
@@ -1544,7 +1571,7 @@ async def _ensure_gate_links(context) -> int:
     """
     links = db_gate_links()
     made = 0
-    for b in _gate_blocks():
+    for b in _gate_blocks(scope):
         cid = b.get("id")
         if not cid or str(cid) in links:
             continue
@@ -1560,13 +1587,13 @@ async def _ensure_gate_links(context) -> int:
     return made
 
 
-async def send_join_gate(update, context, edit=False, joined=None):
-    await _ensure_gate_links(context)
+async def send_join_gate(update, context, edit=False, joined=None, scope=None):
+    await _ensure_gate_links(context, scope)
     text = GATE_MESSAGE
     kb = link_keyboard(extra_rows=[
         [_btn(GATE_BUTTON_TEXT, callback_data="check_join", style="success")],
     ], joined=joined, tap_done=_tap_done_names(update.effective_user.id),
-        blocks=_gate_blocks())
+        blocks=_gate_blocks(scope))
     sent = None
     if edit and update.callback_query:
         sent = await _safe(update.callback_query.edit_message_text, text, reply_markup=kb)
@@ -1575,6 +1602,10 @@ async def send_join_gate(update, context, edit=False, joined=None):
     else:
         sent = await _safe(update.effective_message.reply_text, text, reply_markup=kb)
     uid = update.effective_user.id
+    # Check button ko yaad rahe ki kaunsa gate dikha tha (owner ka halka gate
+    # ya admin ka poora gate) — warna verify galat list par hoti.
+    _gate_scope[uid] = scope or "admin"
+    _prune(_gate_scope, 5000)
     if sent is not None and getattr(sent, "message_id", None):
         _gate_msg[uid] = (getattr(sent, "chat_id", update.effective_chat.id),
                           sent.message_id)
@@ -1770,10 +1801,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         code = context.args[0][1:]
         p = db_post_get(code)
         if p:
-            if await needs_join(context, user.id, force=True):
+            # Owner ke post (channel_ids bhare) -> HALKA gate: Club + Lab.
+            # Admin ke link (channel_ids khali) -> poora gate: Lab + 5 anime.
+            _gscope = "owner" if (p.get("channel_ids") or []) else "admin"
+            if await needs_join(context, user.id, force=True, scope=_gscope):
                 _pending_post[user.id] = code
                 _prune(_pending_post, 5000)
-                await send_join_gate(update, context)
+                await send_join_gate(update, context, scope=_gscope)
             else:
                 await _post_welcome(update, context, p)
             return
@@ -3366,7 +3400,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Strict: cache ignore karke fresh check — join karke turant chhod diya
     # ho, ya cache purana ho, to bhi pakda jaye.
-    joined, missing, unknown, need = await join_status(context, user.id, force=True)
+    _scope = _gate_scope.get(user.id, "admin")
+    joined, missing, unknown, need = await join_status(
+        context, user.id, force=True, scope=_scope)
 
     # STRICT GATE: "Request to Join" SIRF tab milega jab join/request confirm ho
     # jaye. Do soorat me block:
@@ -3392,7 +3428,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             extra_rows=[[_btn(GATE_BUTTON_TEXT, callback_data="check_join",
                               style="success")]],
             joined=joined_ids, tap_done=_tap_done_names(user.id),
-            blocks=_gate_blocks())
+            blocks=_gate_blocks(_scope))
         # USI message ko edit karo jis par user ne tap kiya — isse ✓ wahin
         # dikhta hai jahan user dekh raha hai (naya message bhejne se wo purane
         # message me ✓ dhundhta rehta tha).
