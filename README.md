@@ -17,7 +17,20 @@ tracked deep link, and keeps its state in MongoDB so nothing is lost on redeploy
 
 **Community management.** Welcomes new members with a banner, serves `/rules`, handles reports,
 gives every member a referral link with a live count, and lets admins rename the group, create invite
-links, kick, delete, pin, and promote. Every privileged action is written to an action log, so
+links, kick, delete, pin, and promote.
+
+**Join requests.** Two buckets, nothing in between. A request for Avenor Feed, Avenor Club or
+Avenor Lab is approved instantly and the person gets the welcome DM. A request for any other chat —
+including the five anime channels — is never auto-approved and never rejected: the requester gets a
+short "waiting for approval" DM, and the request goes straight to the first admin's private chat with
+Approve / Reject / Pending buttons. Add more auto-approve chats with `AUTO_APPROVE_EXTRA` (usernames
+or numeric ids) or by editing `AUTO_APPROVE_CHANNELS`.
+
+Requests are also replayed at startup. The Bot API has no "list pending requests" method, so the bot
+uses its own `requests` record: on boot it re-checks every recorded request, approves the ones for the
+three rooms that were never approved (crash, restart, or the bot not being admin at the time), and
+drops records that are stale (older than 30 days), already joined, or no longer valid. Anime and
+unknown chats are skipped without a single API call. Every privileged action is written to an action log, so
 "who banned whom, and why" has an answer later.
 
 **AI assistant.** Replies to any private message without needing a command, and answers in a group

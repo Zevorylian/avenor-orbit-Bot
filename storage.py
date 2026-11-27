@@ -1451,6 +1451,15 @@ def db_add_request(user_id, chat_id):
         _requests_cache = dict(r)
 
 
+def db_requests_all() -> dict:
+    """{user_id: {chat_id: ts}} ki COPY — saari join requests.
+
+    Ye "pending" maani jaati hain: record tab tak rehta hai jab tak user
+    asli member na ban jaye (on_chat_member) ya approve fail na ho.
+    Restart ke baad inhe dobara dekhne ke liye (replay) chahiye."""
+    return {str(uid): _per_user(per) for uid, per in dict(_requests()).items()}
+
+
 def db_del_request(user_id, chat_id):
     """User ne join kar liya ya LEAVE kar diya -> request record hata do."""
     global _requests_cache

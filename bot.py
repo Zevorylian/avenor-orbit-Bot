@@ -162,6 +162,8 @@ from config import (
     AI_MODEL_CYCLES,
     AI_BOT_LINK,
     CHANNEL_LINK,
+    AUTO_APPROVE_CHANNELS,
+    AUTO_APPROVE_NAMES,
     INVITE_ENABLED,
     INVITE_MIN_TURNS,
     INVITE_COOLDOWN_DAYS,
@@ -287,6 +289,7 @@ from storage import (
     is_done,
     db_add_request,
     db_del_request,
+    db_requests_all,
     has_request,
     db_link_add,
     db_links,
@@ -3700,7 +3703,7 @@ async def on_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _note_audience(r.chat.id, usr, src="reaction", status="member")
 
 
-async def _join_welcome_dm(context, req, chat) -> None:
+async def _join_welcome_dm(context, req, chat, approved=True) -> None:
     """Join REQUEST bhejne wale ko EK message — chahe usne bot start na kiya ho.
 
     Bot API 5.5+ ka rule: jis chat me bot admin hai aur uske paas
@@ -3728,10 +3731,18 @@ async def _join_welcome_dm(context, req, chat) -> None:
             [_btn("Avenor Club", url=COMMUNITY_LINK)],
             [_btn("say hi to Mahiru",
                   url=f"https://t.me/{context.bot.username}?start=src_joinreq")]]
-    text = (f"hey {name} — request mil gayi, andar aa sakte ho.\n\n"
-            f"I am Mahiru. There are two more places you might like:\n"
-            f"apps and AI tools in the channel, people in the group.\n\n"
-            f"kuch bhi poochna ho to yahin likh do, main padh rahi hoon.")
+    if approved:
+        text = (f"hey {name} — request mil gayi, andar aa sakte ho.\n\n"
+                f"I am Mahiru. There are two more places you might like:\n"
+                f"apps and AI tools in the channel, people in the group.\n\n"
+                f"kuch bhi poochna ho to yahin likh do, main padh rahi hoon.")
+    else:
+        # Anime / admin channels: abhi approve nahi hua, sirf admin ke paas
+        # hai. Jhooth nahi bolte — "andar aa sakte ho" nahi likhte.
+        text = (f"hey {name} — tumhari request mil gayi hai.\n\n"
+                f"admin ke paas hai, approve hote hi andar aa jaoge. "
+                f"kuch poochna ho to yahin likh do.\n\n"
+                f"I am Mahiru. apps and AI tools yahan aate hain:")
     sent = await _safe(context.bot.send_message, target, text,
                        reply_markup=InlineKeyboardMarkup(rows))
     if sent is not None:
@@ -3749,6 +3760,55 @@ def _is_admin_channel(chat_id) -> bool:
     return False
 
 
+def _auto_approve_keys() -> set:
+    """Join request jinke liye TURANT approve hota hai — sirf owner ke rooms.
+
+    Keys: lowercase username (bina @) aur numeric chat id, dono. Config me
+    poora link ho ya @username ya numeric id — teeno chalte hain."""
+    out = set()
+    for v in AUTO_APPROVE_CHANNELS:
+        s = str(v or "").strip()
+        if not s:
+            continue
+        if s.startswith(("http://", "https://")):
+            s = s.rstrip("/").rsplit("/", 1)[-1]
+        s = s.lstrip("@").strip().lower()
+        if s and not s.startswith("+"):      # invite link (t.me/+abc) ka koi
+            out.add(s)                       # username nahi hota
+    for b in LINK_BLOCKS:
+        cid = str(b.get("id") or "").strip().lstrip("@").lower()
+        if cid:
+            out.add(cid)
+    return out
+
+
+def _is_auto_approve_chat(chat) -> bool:
+    """Is chat ke join request khud approve honge? (Feed / Club / Lab)
+
+    Telegram join-request me har chat ka @username nahi bhejta (private room
+    ho to sirf id + title). Isliye teen tarah se pehchante hain, warna
+    auto-approve chup-chaap fail ho kar Admin 1 ke paas chala jata:
+      1) @username ya numeric id config me ho
+      2) bot ne pehle is chat ki id seekh li ho (_learned_ids, naam se)
+      3) chat ka title bilkul wahi naam ho (private room)
+    """
+    keys = _auto_approve_keys()
+    uname = str(getattr(chat, "username", "") or "").strip().lstrip("@").lower()
+    if uname and uname in keys:
+        return True
+    cid = _cid_key(_norm_chat_id(getattr(chat, "id", 0)))
+    if cid in keys:
+        return True
+    names = {_norm(n) for n in AUTO_APPROVE_NAMES if n}
+    if not names:
+        return False
+    for name, learned in (_learned_ids() or {}).items():
+        if _norm(name) in names and _cid_key(_norm_chat_id(learned)) == cid:
+            return True
+    title = _norm(getattr(chat, "title", "") or "")
+    return bool(title and title in names)
+
+
 def _first_admin_id() -> int:
     """Admin 1 — pehla admin (env ADMIN_IDS, phir DB admins)."""
     ids = [int(a) for a in ADMIN_IDS] + [int(k) for k in db_admins()]
@@ -3756,10 +3816,11 @@ def _first_admin_id() -> int:
 
 
 async def _notify_admin_join_request(context, chat, usr) -> None:
-    """Private anime channel ki join request -> Admin 1 ko DM + 3 buttons.
+    """Jo chat khud approve nahi hoti, uski request -> Admin 1 ko DM + 3 buttons.
 
-    Owner ke apne channel (Avenor Feed) ke liye ye nahi chalta — wahan pehle jaisa
-    auto-approve + welcome DM hi rehta hai.
+    Yahan aate hain: admin ke 5 anime channels, aur koi bhi chat jo
+    AUTO_APPROVE_CHANNELS me nahi hai. Owner ke Feed / Club / Lab yahan
+    nahi aate — wahan auto-approve + welcome DM chalta hai.
     """
     target = _first_admin_id() or owner_id()
     if not target:
@@ -3801,10 +3862,15 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _src = str(getattr(req.invite_link, "name", "") or "invite")[:40]
     _note_audience(chat.id, usr, src=_src or "join_request", status="requested")
 
-    # 5 private anime channels: khud approve NAHI — Admin 1 ko DM jata hai
-    # (Approve / Reject / Pending). Requester ko welcome DM bhi nahi, kyunki
-    # wo abhi member hai hi nahi.
-    if _is_admin_channel(chat.id):
+    # DO HI BUCKET:
+    #   1) Avenor Feed / Club / Lab -> turant approve (+ welcome DM)
+    #   2) baaki har chat (admin ke 5 anime channels bhi) -> approve NAHI,
+    #      seedha Admin 1 ke private chat me Approve / Reject / Pending
+    # Requester ko welcome DM nahi jaata, kyunki wo abhi member hai hi nahi.
+    if _is_admin_channel(chat.id) or not _is_auto_approve_chat(chat):
+        # User ko DM yahan bhi jaata hai (pending text ke saath), par approve
+        # NAHI hota aur koi reject bhi nahi hota — sirf Admin 1 decide karta hai.
+        await _join_welcome_dm(context, req, chat, approved=False)
         await _notify_admin_join_request(context, chat, usr)
         return
 
@@ -3819,6 +3885,88 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # ko 'joined' maan leta tha jabki wo chat me hai hi nahi.
         db_del_request(usr.id, chat.id)
         log.warning("Join auto-approve fail (%s): %s", chat.id, e)
+
+
+_REPLAY_MAX = 200          # ek restart par itni purani requests
+_REPLAY_AGE_DAYS = 30      # isse purani request chhod do
+
+
+async def _replay_pending_requests(app) -> None:
+    """Restart ke baad PURANI (pending) join requests dobara dekho.
+
+    Bot API me "pending requests ki list" ka koi method nahi hai — sirf
+    `chat_join_request` update aata hai, wo bhi ek hi baar. Isliye bot apne
+    record (`requests`) se replay karta hai: jo request pehle aayi par
+    approve nahi ho payi (crash, restart, ya us waqt bot admin nahi tha),
+    wo ab approve ho jaati hai.
+
+    Sirf auto-approve rooms (Feed / Club / Lab). Anime aur anjaan chats me
+    kuch nahi hota — wahan Admin 1 decide karta hai, koi reject nahi hota.
+    """
+    try:
+        pend = db_requests_all()
+    except Exception as e:
+        log.warning("Purani requests padh nahi paye: %s", e)
+        return
+    if not pend:
+        return
+    cutoff = time.time() - _REPLAY_AGE_DAYS * 86400
+    ok = clean = fail = skip = 0
+    seen = 0
+    for uid_s, per in pend.items():
+        try:
+            uid = int(uid_s)
+        except (TypeError, ValueError):
+            continue
+        for cid_s, ts in list(per.items()):
+            if seen >= _REPLAY_MAX:
+                break
+            seen += 1
+            try:
+                if ts and float(ts) < cutoff:      # bahut purani — chhod do
+                    db_del_request(uid, cid_s)
+                    clean += 1
+                    continue
+            except (TypeError, ValueError):
+                pass
+            try:
+                cid = int(cid_s)
+            except (TypeError, ValueError):
+                cid = cid_s
+            if _is_admin_channel(cid):
+                skip += 1                          # Admin 1 ka kaam, API call bhi nahi
+                continue
+            try:
+                ch = await app.bot.get_chat(cid)
+            except Exception:
+                db_del_request(uid, cid_s)         # chat mila hi nahi
+                clean += 1
+                continue
+            if not _is_auto_approve_chat(ch):
+                skip += 1
+                continue
+            try:
+                m = await app.bot.get_chat_member(cid, uid)
+                if m.status not in NOT_MEMBER_STATUSES:
+                    db_del_request(uid, cid_s)     # pehle se member hai
+                    clean += 1
+                    continue
+            except Exception:
+                pass
+            try:
+                await app.bot.approve_chat_join_request(cid, uid)
+                db_del_request(uid, cid_s)
+                ok += 1
+                log.info("Purani request approve: %s (%s)", uid, cid)
+            except Exception as e:
+                # request valid nahi rahi (pehle hi approve/decline ho chuki)
+                db_del_request(uid, cid_s)
+                fail += 1
+                log.info("Purani request approve nahi hui (%s/%s): %s", cid, uid, e)
+            await asyncio.sleep(0.2)               # flood se bachne ke liye
+    if ok or clean or fail:
+        log.info("Purani requests: approved %s, cleaned %s, failed %s, skipped %s",
+                 ok, clean, fail, skip)
 
 
 async def on_guest_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6575,6 +6723,7 @@ def run_webhook(app: Application):
         await app.initialize()
         await _start_mongo(app)
         await verify_blocks_on_startup(app)
+        await _replay_pending_requests(app)
         await _rearm_posts(app)
         await _rearm_autopost(app)
         _schedule_maintenance(app)
@@ -6775,6 +6924,7 @@ async def _on_shutdown(app: Application):
 async def _polling_post_init(app: Application):
     await _start_mongo(app)
     await verify_blocks_on_startup(app)
+    await _replay_pending_requests(app)
     await _rearm_posts(app)
     await _rearm_autopost(app)
     _schedule_maintenance(app)

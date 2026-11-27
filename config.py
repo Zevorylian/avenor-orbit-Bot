@@ -470,6 +470,27 @@ CHANNEL_LINK = os.getenv("CHANNEL_LINK", "https://t.me/AvenorFeed")
 # Development / build channel — dev logs, experiments, jo abhi ship nahi hua.
 LAB_LINK = os.getenv("LAB_LINK", "https://t.me/AvenorLab")
 
+# ---- JOIN-REQUEST POLICY (do hi bucket) -------------------------------
+#   AUTO_APPROVE_CHANNELS -> request aayi, bot TURANT approve karta hai
+#   baaki HAR chat         -> approve NAHI hota; Admin 1 ko DM jaata hai
+#                             (Approve / Reject / Pending buttons)
+# Isliye admin ke anime channels me kuch bhi khud approve nahi hota, aur
+# koi anjaan channel bhi khud-ba-khud approve nahi ho jata (fail-closed).
+#
+# Naya chat jodna ho to yahan ek line, ya Render me env:
+#   AUTO_APPROVE_EXTRA=@username,-1001234567890
+AUTO_APPROVE_CHANNELS = [
+    CHANNEL_LINK,        # Avenor Feed
+    COMMUNITY_LINK,      # Avenor Club
+    LAB_LINK,            # Avenor Lab
+] + [x.strip() for x in (os.getenv("AUTO_APPROVE_EXTRA") or "").split(",") if x.strip()]
+
+# In rooms ke NAAM (LINK_BLOCKS jaisa). Join request me Telegram har chat me
+# @username nahi bhejta — private room ho to sirf id + title aata hai. Isliye
+# bot inhe naam se bhi pehchanta hai, warna auto-approve chup-chaap fail ho
+# jata aur request Admin 1 ke paas chali jaati.
+AUTO_APPROVE_NAMES = ["Avenor Feed", "Avenor Club", "Avenor Lab"]
+
 # ---- INVITE TIMING (Mahiru kab channel/group kholti hai) ---------------
 # Random nahi: code eligibility tay karta hai (kitni baat, cooldown,
 # "nahi" bola ya nahi, mood heavy hai ya nahi) aur AI sirf tab bolti hai
