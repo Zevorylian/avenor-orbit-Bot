@@ -3838,24 +3838,25 @@ async def _join_welcome_dm(context, req, chat, approved=True) -> None:
         return
     target = getattr(req, "user_chat_id", None) or usr.id
     name = (usr.first_name or "you").strip()
-    rows = [[_btn("Avenor Feed", url=CHANNEL_LINK)],
-            [_btn("Avenor Club", url=COMMUNITY_LINK)],
-            [_btn("say hi to Mahiru",
-                  url=f"https://t.me/{context.bot.username}?start=src_joinreq")]]
     if approved:
+        # Approve ho gaya (Feed / Club / Lab) -> chhota welcome + doosre rooms.
         text = (f"hey {name} — request mil gayi, andar aa sakte ho.\n\n"
                 f"I am Mahiru. There are two more places you might like:\n"
                 f"apps and AI tools in the channel, people in the group.\n\n"
                 f"kuch bhi poochna ho to yahin likh do, main padh rahi hoon.")
+        kb = InlineKeyboardMarkup([
+            [_btn("Avenor Feed", url=CHANNEL_LINK)],
+            [_btn("Avenor Club", url=COMMUNITY_LINK)],
+            [_btn("say hi to Mahiru",
+                  url=f"https://t.me/{context.bot.username}?start=src_joinreq")],
+        ])
     else:
-        # Anime / admin channels: abhi approve nahi hua, sirf admin ke paas
-        # hai. Jhooth nahi bolte — "andar aa sakte ho" nahi likhte.
-        text = (f"hey {name} — tumhari request mil gayi hai.\n\n"
-                f"admin ke paas hai, approve hote hi andar aa jaoge. "
-                f"kuch poochna ho to yahin likh do.\n\n"
-                f"I am Mahiru. apps and AI tools yahan aate hain:")
-    sent = await _safe(context.bot.send_message, target, text,
-                       reply_markup=InlineKeyboardMarkup(rows))
+        # Admin ke channels: approve abhi hua nahi. Sirf ek saaf line —
+        # koi extra box, koi promo button nahi (owner ne hataya).
+        text = (f"hey {name} — tumhari request admin ko bhej di hai.\n\n"
+                f"approve hote hi andar aa jaoge. tab tak yahin likh sakte ho.")
+        kb = None
+    sent = await _safe(context.bot.send_message, target, text, reply_markup=kb)
     if sent is not None:
         _join_dm_at[usr.id] = now
         _prune(_join_dm_at, 5000)
