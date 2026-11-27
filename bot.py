@@ -1671,6 +1671,9 @@ async def verify_blocks_on_startup(app: Application):
     """Start par check: har enforced chat ki id hai? bot admin hai?
     Jo problem mile wo admin ko DM bhi bhejo — sirf log me chhodo mat."""
     log.info("Storage: %s", mongo_status())
+    log.info("AUTO-APPROVE chats: %s", sorted(_auto_approve_keys()))
+    log.info("NEVER auto-approve (admin, Admin 1 ko DM): %s",
+             [n for n, _c in ADMIN_CHANNELS])
     log.info("Build %s | name: %s | username: %s", BOT_BUILD, BOT_BRAND, BOT_USERNAME)
     try:
         _me0 = await app.bot.get_me()
@@ -2941,6 +2944,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('groups')} : {bd('can be added') if getattr(me, 'can_join_groups', True) else bd('BLOCKED — BotFather me groups off hain')}",
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
            f"{sc('auto-approve')} : {', '.join(sorted(_auto_approve_keys())) or '-'}",
+           f"{sc('never-approve')} : {', '.join(n for n, _c in ADMIN_CHANNELS)}",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
            f"{sc('roster')} : {bd('ready') if not roster.available() else roster.available()}",
            f"{sc('dm sent')} : {bd(str(_eph_stats['sent']))} "
@@ -3921,6 +3925,27 @@ def _is_auto_approve_chat(chat) -> bool:
     return bool(title and title in names)
 
 
+def _admin_chat_names() -> set:
+    """ADMIN_CHANNELS ke normalised naam (id galat ho to bhi pehchan ho)."""
+    return {_norm(n) for n, _c in ADMIN_CHANNELS if n}
+
+
+def _never_auto_approve(chat) -> bool:
+    """Admin ke 5 anime chats — inme KABHI auto-approve nahi.
+
+    Id se, aur naam se bhi — kyunki config ki id purani/galat ho sakti hai.
+    Ye check approve se pehle SABSE pehle chalta hai, isliye koi bhi aur
+    setting (AUTO_APPROVE_EXTRA, title match, purana cache) ise bypass nahi
+    kar sakti."""
+    try:
+        if _is_admin_channel(getattr(chat, "id", 0)):
+            return True
+    except Exception:
+        pass
+    title = _norm(getattr(chat, "title", "") or "")
+    return bool(title and title in _admin_chat_names())
+
+
 def _first_admin_id() -> int:
     """Admin 1 — pehla admin (env ADMIN_IDS, phir DB admins)."""
     ids = [int(a) for a in ADMIN_IDS] + [int(k) for k in db_admins()]
@@ -3979,7 +4004,7 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     #   2) baaki har chat (admin ke 5 anime channels bhi) -> approve NAHI,
     #      seedha Admin 1 ke private chat me Approve / Reject / Pending
     # Requester ko welcome DM nahi jaata, kyunki wo abhi member hai hi nahi.
-    if _is_admin_channel(chat.id) or not _is_auto_approve_chat(chat):
+    if _never_auto_approve(chat) or not _is_auto_approve_chat(chat):
         # User ko DM yahan bhi jaata hai (pending text ke saath), par approve
         # NAHI hota aur koi reject bhi nahi hota — sirf Admin 1 decide karta hai.
         await _join_welcome_dm(context, req, chat, approved=False)
@@ -3991,7 +4016,7 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # AAKHRI CHECK: yahan tak pahunchne ka matlab hai chat Feed/Club/Lab hai.
     # Phir bhi dobara check — koi bhi galti se anime me approve na kar de.
-    if not _is_auto_approve_chat(chat) or _is_admin_channel(chat.id):
+    if not _is_auto_approve_chat(chat) or _never_auto_approve(chat):
         log.warning("Auto-approve BLOCKED for %s (%s) — ye auto-approve chat "
                     "nahi hai. Admin 1 ko bheja ja raha hai.", chat.title, chat.id)
         await _notify_admin_join_request(context, chat, usr)
@@ -4062,7 +4087,7 @@ async def _replay_pending_requests(app) -> None:
                 db_del_request(uid, cid_s)         # chat mila hi nahi
                 clean += 1
                 continue
-            if not _is_auto_approve_chat(ch):
+            if _never_auto_approve(ch) or not _is_auto_approve_chat(ch):
                 skip += 1
                 continue
             try:
