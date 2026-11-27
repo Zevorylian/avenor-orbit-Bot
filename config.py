@@ -392,10 +392,12 @@ GUEST_MODE = os.getenv("GUEST_MODE", "True").strip().lower() in ("1", "true", "y
 MIN_JOINS_REQUIRED = os.getenv("MIN_JOINS_REQUIRED", "all")
 
 # Force-join gate par jo message dikhta hai (links ke upar).
+# Saada text — pehle yahan Unicode "small caps" (ʜᴇʏ, ᴊᴏɪɴ …) likha tha.
+# Wo letters aadhi height ke dikhte hain ("half block") aur neeche ke normal
+# buttons se match nahi karte. Ab wahi style jo buttons ki hai.
 GATE_MESSAGE = os.getenv("GATE_MESSAGE", (
-    "ʜᴇʏ..! ⚡️\n\n"
-    "ᴊᴏɪɴ ᴛʜᴇ ᴄʜᴀɴɴᴇʟs ʙᴇʟᴏᴡ,\n"
-    "ᴛʜᴇɴ ᴛᴀᴘ ᴠᴇʀɪꜰʏ."
+    "Hey..! ⚡️\n\n"
+    "Join the channels below, then tap Verify."
 ))
 
 # Gate ke neeche wala button (join check karta hai).
