@@ -1144,6 +1144,15 @@ def _is_tap_block(b) -> bool:
 
 _gate_scope: dict = {}      # uid -> "owner" | "admin" (kaunsa gate dikha)
 
+# Gate invite links ka version. v2 = creates_join_request=True wale links.
+# Purane (v1) links DB me pade hain aur seedha andar jaane dete hain — unhe
+# use NAHI karte, isliye key me version hai.
+_GATE_LINK_V = "v2"
+
+
+def _gate_link_key(cid) -> str:
+    return f"{_GATE_LINK_V}:{_cid_key(cid)}"
+
 
 def _gate_blocks(scope=None) -> list:
     """Force-join ke liye zaroori blocks.
@@ -1174,7 +1183,7 @@ def _gate_blocks(scope=None) -> list:
             if not (b.get("id") or b.get("url")):
                 continue
             cid = b.get("id")
-            _add({**b, "url": links.get(str(cid)) or b.get("url"),
+            _add({**b, "url": links.get(_gate_link_key(cid)) or b.get("url"),
                   "require_join": True, "row": 100})
         if POST_GATE_BOT_LINK:
             # require_join False -> verify me ginti nahi, sirf link button.
@@ -1187,7 +1196,7 @@ def _gate_blocks(scope=None) -> list:
         if not (b.get("id") or b.get("url")):
             continue
         cid = b.get("id")
-        url = links.get(str(cid)) or b.get("url")
+        url = links.get(_gate_link_key(cid)) or b.get("url")
         _add({**b, "url": url, "require_join": True, "row": 100 + i // 2})
     # 2) /gate se runtime add kiye gaye
     g = db_gate()
@@ -1573,12 +1582,16 @@ async def _ensure_gate_links(context, scope=None) -> int:
     made = 0
     for b in _gate_blocks(scope):
         cid = b.get("id")
-        if not cid or str(cid) in links:
+        if not cid or _gate_link_key(cid) in links:
             continue
         try:
+            # creates_join_request=True ZAROORI: warna Telegram seedha andar
+            # jaane deta hai (koi request hi nahi aati) — aur wo "auto approval"
+            # jaisa dikhta hai. Ab har entry ek request banegi: Feed/Club/Lab
+            # ko bot turant approve karta hai, anime Admin 1 ke paas jaate hain.
             link = await context.bot.create_chat_invite_link(
-                cid, name=f"{BOT_BRAND[:20]} gate")
-            db_gate_link_set(cid, link.invite_link)
+                cid, name=f"{BOT_BRAND[:20]} gate", creates_join_request=True)
+            db_gate_link_set(_gate_link_key(cid), link.invite_link)
             made += 1
         except Exception as e:
             log.warning("Gate invite link fail (%s): %s", b.get("name"), e)
@@ -2927,6 +2940,7 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"{sc('privacy')} : {bd('off (bot sees all group messages)') if getattr(me, 'can_read_all_group_messages', False) else bd('on (only mentions and replies)')}",
            f"{sc('groups')} : {bd('can be added') if getattr(me, 'can_join_groups', True) else bd('BLOCKED — BotFather me groups off hain')}",
            f"{sc('checks')} : {len(_ready)}/{len(_ready) + len(_no_id)} {sc('channels')}",
+           f"{sc('auto-approve')} : {', '.join(sorted(_auto_approve_keys())) or '-'}",
            f"{sc('ai today')} : {bd(str(_usage.get('total', 0)))}/{AI_DAILY_MAX or '∞'}",
            f"{sc('roster')} : {bd('ready') if not roster.available() else roster.available()}",
            f"{sc('dm sent')} : {bd(str(_eph_stats['sent']))} "
@@ -3974,9 +3988,17 @@ async def on_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _join_welcome_dm(context, req, chat)
     if not AUTO_APPROVE_JOIN:
         return
+    # AAKHRI CHECK: yahan tak pahunchne ka matlab hai chat Feed/Club/Lab hai.
+    # Phir bhi dobara check — koi bhi galti se anime me approve na kar de.
+    if not _is_auto_approve_chat(chat) or _is_admin_channel(chat.id):
+        log.warning("Auto-approve BLOCKED for %s (%s) — ye auto-approve chat "
+                    "nahi hai. Admin 1 ko bheja ja raha hai.", chat.title, chat.id)
+        await _notify_admin_join_request(context, chat, usr)
+        return
     try:
         await context.bot.approve_chat_join_request(chat_id=chat.id, user_id=usr.id)
-        log.info("Join request auto-approved: %s (%s)", usr.full_name, usr.id)
+        log.info("AUTO-APPROVED: %s in %s (%s)",
+                 usr.full_name, chat.title, chat.id)
     except Exception as e:
         # Approve nahi hua -> request record bhi hata do. Warna gate us user
         # ko 'joined' maan leta tha jabki wo chat me hai hi nahi.
