@@ -823,10 +823,15 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
             log.info("AI chain: saare model fail — pehle se dobara (pass %s/%s)",
                      cycle + 1, AI_MODEL_CYCLES)
             await asyncio.sleep(min(0.4 * cycle + random.random() * 0.3, 2))
-        for model in chain:
+        for mi, model in enumerate(chain):
             left = deadline - time.monotonic()
             if left <= 2:
                 break
+            # Bacha hua waqt baaki models me BAANT do. Pehle har koshish ko
+            # poora AI_TIMEOUT (45s) milta tha, isliye ek atka hua model
+            # poora budget kha jata tha aur user 45s tak kuch nahi sunta tha.
+            remaining = max(1, len(chain) - mi)
+            per_try = max(3.0, min(float(AI_TIMEOUT), left / remaining))
             attempt += 1
             try:
                 # ZAROORI ("jawab kabhi aata nahi"): har koshish ka apna
@@ -834,7 +839,7 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                 async with _ai_limiter():
                     text = await asyncio.wait_for(
                         asyncio.to_thread(_run_ai, model, prompt, history),
-                        timeout=max(1, min(AI_TIMEOUT, left)))
+                        timeout=per_try)
                 if text:
                     text = _strip_md(text)      # markdown hatao (* aur ` )
                     if len(text) > AI_MAX_CHARS:
@@ -859,9 +864,9 @@ async def ask_ai(prompt: str, lite: bool = False, where: str = "", mem_key=None,
                 log.warning("AI ne khaali jawab diya (model=%s #%s)", model, attempt)
             except asyncio.TimeoutError:
                 _ai_stats["timeout"] += 1
-                last_err = f"timeout after {AI_TIMEOUT}s"
-                log.warning("AI timeout (model=%s #%s, %ss) — agla model",
-                            model, attempt, AI_TIMEOUT)
+                last_err = f"timeout after {per_try:.0f}s"
+                log.warning("AI timeout (model=%s #%s, %.0fs) — agla model",
+                            model, attempt, per_try)
                 continue
             except Exception as e:
                 last_err = e
@@ -2320,8 +2325,13 @@ def _bubbles(text: str) -> list:
 
 
 def _typing_delay(text: str) -> float:
-    """Sochne + type karne ka andaza: 0.4s + ~55 character per second."""
-    return min(HUMAN_MAX_DELAY, 0.4 + len(text or "") / 55.0)
+    """Ek bubble ke liye typing ka andaza: 0.2s + ~90 char per second, aur
+    per bubble 0.9s se zyada nahi.
+
+    Pehle 55 char/s tha aur cap HUMAN_MAX_DELAY (4s) — isliye jawab AI se aa
+    chuka hota tha par user ko 3-4 second baad dikhta tha. Wahi "bot slow
+    hai" wali feeling thi; asli AI latency isse alag cheez hai."""
+    return min(0.9, 0.2 + len(text or "") / 90.0)
 
 
 async def _send_human(bot, chat_id, text, reply_to=None):
@@ -4015,13 +4025,18 @@ async def _react(bot, msg) -> None:
 
 async def _answer_private(context, chat_id, user, text, gap_h=None) -> None:
     """Ek hi jagah se AI ka jawab — debounced aur seedha, dono yahi use karte."""
+    _t0 = time.monotonic()
     _ai_count()
     async with _typing(context, chat_id):
         answer = await ask_ai(
             text, where="a private chat", mem_key=f"u{user.id}",
             note=_owner_note(user.id), invite_uid=user.id,
             gap_h=gap_h, name=user.first_name or "")
+    _ai_ms = (time.monotonic() - _t0) * 1000
     await _send_human(context.bot, chat_id, answer)
+    # Asli number log me — warna "delay" ka andaza hi lagta rehta hai.
+    log.info("Latency: ai=%.0fms, delivered=%.0fms",
+             _ai_ms, (time.monotonic() - _t0) * 1000)
 
 
 async def _debounced_answer(context, chat_id, user, slot, gap_h) -> None:
@@ -4101,7 +4116,9 @@ async def on_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.effective_message.text or ""
     chat_id = update.effective_chat.id
     # DEBOUNCE: user ek saath 3 message bhej de (venting) to 3 jawab nahi —
-    # 1.2s ruk kar poora padho, ek jawab do. Insaan yahi karta hai.
+    # poora padho, ek jawab do. Window chhota hai (0.35s), isliye akele
+    # message par bhi kuch mehsoos nahi hota; pehle 1.2s tha aur wahi sabse
+    # zyada "bot slow hai" lagta tha.
     if MSG_DEBOUNCE > 0:
         slot = _debounce.setdefault(user.id, {"texts": [], "task": None})
         slot["texts"].append(text)
@@ -4197,12 +4214,14 @@ async def on_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prompt = _strip_mention(text, me.username) or "The user mentioned you. Greet them warmly."
     title = _clean_title(msg.chat.title)
     where = f'the Telegram group "{title}"' if title else "a Telegram group"
+    _t0 = time.monotonic()
     async with _typing(context, update.effective_chat.id):
         answer = await ask_ai(
             prompt, where=where,
             mem_key=f"g{msg.chat.id}:u{update.effective_user.id}",
             note=_owner_note(update.effective_user.id),
         )
+    log.info("Latency (group): ai=%.0fms", (time.monotonic() - _t0) * 1000)
     # Group me invite jaan-boojh kar NAHI (invite_uid nahi bhejte) — wahan
     # channel ki baat spam lagti hai. Timing/bubbles wahi insaan jaise.
     await _send_human(context.bot, msg.chat.id, answer, reply_to=msg.message_id)

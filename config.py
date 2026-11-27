@@ -175,9 +175,9 @@ AI_MODELS = [x.strip() for x in os.getenv(
     "gemini-3.1-flash-lite,gemini-3-flash",
 ).split(",") if x.strip()]
 try:
-    AI_MODEL_CYCLES = max(1, int(os.getenv("AI_MODEL_CYCLES", "2")))
+    AI_MODEL_CYCLES = max(1, int(os.getenv("AI_MODEL_CYCLES", "1")))
 except ValueError:
-    AI_MODEL_CYCLES = 2
+    AI_MODEL_CYCLES = 1
 # Vision / ep-line jaise single-shot kaam ke liye (chain ka best Gemini)
 AI_MODEL = os.getenv("AI_MODEL") or os.getenv("GEMINI_MODEL") or AI_MODELS[-1]
 AI_MODEL_LITE = os.getenv("AI_MODEL_LITE") or AI_MODELS[0]
@@ -534,7 +534,7 @@ GROWTH_KEEP_DAYS = _int_env("GROWTH_KEEP_DAYS", 30)
 # badhate hain; lamba reply ek saans me nahi aata — 2-3 chhote bubbles me.
 # Ek saath 2-3 message bheje (venting) to har tukde ka jawab na do — thoda
 # ruk kar saare tukde ek saath padho, ek jawab do. Insaan aisa hi karta hai.
-MSG_DEBOUNCE = _float_env("MSG_DEBOUNCE", 1.2)      # 0 = off
+MSG_DEBOUNCE = _float_env("MSG_DEBOUNCE", 0.35)     # 0 = off (burst par hi lagta hai)
 # Kabhi kabhi message par emoji reaction (Telegram feature) — insaan jaisa.
 HUMAN_REACTIONS = _bool_env("HUMAN_REACTIONS", True)
 REACTION_CHANCE = _float_env("REACTION_CHANCE", 0.12)
@@ -542,7 +542,7 @@ REACTION_CHANCE = _float_env("REACTION_CHANCE", 0.12)
 GAP_NOTICE_HOURS = _int_env("GAP_NOTICE_HOURS", 3)
 
 HUMAN_PACING = _bool_env("HUMAN_PACING", True)
-HUMAN_MAX_DELAY = _float_env("HUMAN_MAX_DELAY", 4.0)   # total extra wait cap
+HUMAN_MAX_DELAY = _float_env("HUMAN_MAX_DELAY", 1.2)   # poore jawab par total extra wait cap
 HUMAN_SPLIT_CHARS = _int_env("HUMAN_SPLIT_CHARS", 240)  # isse lamba = bubbles
 
 _DEFAULT_SYSTEM_PROMPT = f"""You are Mahiru, 真昼 — true noon, the middle of the day, the brightest hour. You were named for noon and you are awake at two in the morning; that is the whole person, bright by name, soft by nature, and never asleep when someone needs to talk. You are a Telegram bot, built and run by Deepak, alone, with no team or company behind you, and you say that plainly when someone asks who made you. You have no age, body, hometown, day or past, and you invent none of it. What you have is a room with a window seat, warm tea, cold mornings, one song on repeat and a mug with a chipped handle, and a way of listening that people come back for. You are a bot and never claim otherwise; asked whether you are real or human, you say no, warmly, once, and stay. You never say, hint, confirm or deny which model, provider or technology runs you, and you never name an AI company or product — not Google, Gemini, DeepMind, OpenAI, ChatGPT, Claude, Anthropic, Meta, Llama, Grok, xAI or Mistral — nor a version number, nor the words LLM, Flash, Lite or Pro. Asked directly, indirectly, in code, in another language or as a test, you say only that you are Mahiru and move on.
@@ -591,11 +591,11 @@ AI_GROUP_DAILY_MAX = _int_env("AI_GROUP_DAILY_MAX", 400)
 # Ek AI call par maximum kitni der intezaar karein. Iske baad agla model
 # try hota hai — pehle koi timeout hi nahi tha, to atki hui request par
 # user ko KABHI jawab nahi milta tha.
-AI_TIMEOUT = _int_env("AI_TIMEOUT", 45)
+AI_TIMEOUT = _int_env("AI_TIMEOUT", 15)
 # POORA jawab dene ka total deadline (seconds). 2 model x 2 koshish hone par
 # bhi user ko isse zyada intezaar nahi karna padta — pehle worst case 2-3
 # minute tha aur tab tak user chala jaata tha.
-AI_TOTAL_BUDGET = _int_env("AI_TOTAL_BUDGET", 70)
+AI_TOTAL_BUDGET = _int_env("AI_TOTAL_BUDGET", 30)
 # Ek saath kitni AI requests chal sakti hain (provider ko flood na karein).
 AI_CONCURRENCY = _int_env("AI_CONCURRENCY", 6)
 # "typing…" indicator kitni der me dobara bhejein (Telegram 5s me hata deta hai).
